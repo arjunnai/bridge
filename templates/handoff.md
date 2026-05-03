@@ -5,12 +5,16 @@ ROLE: {{ROLE}}
 REPO: {{REPO}}
 PR: {{PR}}
 TASK: {{TASK}}
+PHASE_PLAN_FILE: {{PHASE_PLAN_FILE}}
 EXPECTED_OUTPUT: {{EXPECTED_OUTPUT}}
 STATUS_MARKER: {{STATUS_MARKER}}
 
 You are receiving a handoff from the codex-bridge.
 
+For implementation or review tasks, read {{PHASE_PLAN_FILE}} before acting.
+
 Read the durable GitHub state for {{REPO}} PR #{{PR}} before acting:
+  - {{PHASE_PLAN_FILE}} (if this is an implementation or review task)
   - PR title and body
   - commits
   - changed files

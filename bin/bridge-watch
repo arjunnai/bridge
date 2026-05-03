@@ -15,6 +15,7 @@ _BRIDGE_LIB_DIR="$_BRIDGE_BIN_DIR/../lib"
 # shellcheck source=lib/bridge-common.sh disable=SC1091
 . "$_BRIDGE_LIB_DIR/bridge-common.sh"
 
+# shellcheck disable=SC2153  # RUN_ID in help heredoc is user-facing example, not a variable
 usage() {
   cat <<EOF
 usage: bridge-watch <pr> [options]
@@ -32,6 +33,15 @@ Notes:
     complete the watch — agents must re-post the marker in a review or
     comment.
 
+Phase orchestration — common patterns:
+  bridge-watch <pr> --status plan_ready
+  bridge-watch <pr> --status implementation_ready
+  bridge-watch <pr> --status approved --phase-status completed --run-id "\$RUN_ID"
+
+Use --phase-status completed to require BRIDGE_PHASE_STATUS: completed in the
+same comment or review body as BRIDGE_STATUS: approved. Without --phase-status,
+bridge-watch exits on BRIDGE_STATUS: approved alone.
+
 Hard failures (exit 1, no retry):
   - GitHub auth (HTTP 401), permission/rate-limit (HTTP 403), missing
     PR/repo (HTTP 404), and other non-transient gh api errors.
@@ -44,6 +54,7 @@ Options:
   --author LOGIN        match author to this GitHub login
   --run-id ID           require BRIDGE_RUN_ID match
   --status VALUE        require BRIDGE_STATUS:<value> match (any if omitted)
+  --phase-status VALUE  also require BRIDGE_PHASE_STATUS:<value> in same body
   --timeout SECONDS     overall timeout (default: \$BRIDGE_WATCH_TIMEOUT or 1200)
   --poll SECONDS        poll interval (default: \$BRIDGE_WATCH_POLL or 10)
   --quiet SECONDS       inline-only quiet window (default: \$BRIDGE_WATCH_QUIET or 90)
@@ -51,20 +62,21 @@ Options:
 EOF
 }
 
-pr=""; repo=""; agent=""; author=""; run_id=""; status=""
+pr=""; repo=""; agent=""; author=""; run_id=""; status=""; phase_status=""
 timeout=""; poll=""; quiet=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    -h|--help) usage; exit 0 ;;
-    --repo)    repo="${2:?--repo requires value}"; shift 2 ;;
-    --agent)   agent="${2:?--agent requires value}"; shift 2 ;;
-    --author)  author="${2:?--author requires value}"; shift 2 ;;
-    --run-id)  run_id="${2:?--run-id requires value}"; shift 2 ;;
-    --status)  status="${2:?--status requires value}"; shift 2 ;;
-    --timeout) timeout="${2:?--timeout requires value}"; shift 2 ;;
-    --poll)    poll="${2:?--poll requires value}"; shift 2 ;;
-    --quiet)   quiet="${2:?--quiet requires value}"; shift 2 ;;
+    -h|--help)       usage; exit 0 ;;
+    --repo)          repo="${2:?--repo requires value}"; shift 2 ;;
+    --agent)         agent="${2:?--agent requires value}"; shift 2 ;;
+    --author)        author="${2:?--author requires value}"; shift 2 ;;
+    --run-id)        run_id="${2:?--run-id requires value}"; shift 2 ;;
+    --status)        status="${2:?--status requires value}"; shift 2 ;;
+    --phase-status)  phase_status="${2:?--phase-status requires value}"; shift 2 ;;
+    --timeout)       timeout="${2:?--timeout requires value}"; shift 2 ;;
+    --poll)          poll="${2:?--poll requires value}"; shift 2 ;;
+    --quiet)         quiet="${2:?--quiet requires value}"; shift 2 ;;
     --) shift; break ;;
     -*) die "unknown flag: $1 (try --help)" ;;
     *)
@@ -105,11 +117,23 @@ if [ -z "$author" ] && [ -n "$agent" ]; then
   fi
 fi
 
-# Validate --status as a strict identifier so the value never leaks into a
-# regex with metacharacters and so prefix-matching is impossible.
+# Validate --status and --phase-status as strict identifiers so values never
+# leak into regex with metacharacters and prefix-matching is impossible.
 if [ -n "$status" ]; then
   if ! printf "%s" "$status" | LC_ALL=C grep -E -q '^[A-Za-z_][A-Za-z0-9_]*$'; then
     die "--status must match [A-Za-z_][A-Za-z0-9_]* (got: $status)"
+  fi
+fi
+if [ -n "$phase_status" ]; then
+  if ! printf "%s" "$phase_status" | LC_ALL=C grep -E -q '^[A-Za-z_][A-Za-z0-9_]*$'; then
+    die "--phase-status must match [A-Za-z_][A-Za-z0-9_]* (got: $phase_status)"
+  fi
+  # Phase completion requires BRIDGE_STATUS: approved in the same body.
+  # Requiring --status approved here prevents callers from combining
+  # --status changes_requested --phase-status completed, which would
+  # allow a body with changes_requested + completed to exit 0.
+  if [ "$status" != "approved" ]; then
+    die "--phase-status requires --status approved (got: --status '${status:-<empty>}')"
   fi
 fi
 
@@ -118,9 +142,10 @@ deadline=$((start_epoch + timeout))
 start_iso=$(bridge_now_iso)
 
 log_info "watching $repo PR #$pr  (timeout=${timeout}s poll=${poll}s quiet=${quiet}s)"
-[ -n "$author" ] && log_info "filter: author=$author"
-[ -n "$run_id" ] && log_info "filter: run_id=$run_id"
-[ -n "$status" ] && log_info "filter: status=$status"
+[ -n "$author" ]       && log_info "filter: author=$author"
+[ -n "$run_id" ]       && log_info "filter: run_id=$run_id"
+[ -n "$status" ]       && log_info "filter: status=$status"
+[ -n "$phase_status" ] && log_info "filter: phase_status=$phase_status"
 log_info "watch start = $start_iso"
 
 # Exact-line marker matchers. A marker is a line of the form:
@@ -159,6 +184,19 @@ _has_status_line() {
   '
 }
 
+_has_phase_status_line() {
+  # _has_phase_status_line <body> <expected-phase-status-or-empty>
+  printf "%s\n" "$1" | awk -v want="$2" '
+    /^[[:space:]]*BRIDGE_PHASE_STATUS:[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*$/ {
+      v = $0
+      sub(/^[[:space:]]*BRIDGE_PHASE_STATUS:[[:space:]]+/, "", v)
+      sub(/[[:space:]]+$/, "", v)
+      if (want == "" || v == want) { found = 1 }
+    }
+    END { exit found ? 0 : 1 }
+  '
+}
+
 _body_matches() {
   # _body_matches "<body>" -> 0 if all filters pass, 1 otherwise.
   local body="$1"
@@ -166,6 +204,9 @@ _body_matches() {
   _has_status_line "$body" "$status" || return 1
   if [ -n "$run_id" ]; then
     _has_runid_line "$body" "$run_id" || return 1
+  fi
+  if [ -n "$phase_status" ]; then
+    _has_phase_status_line "$body" "$phase_status" || return 1
   fi
   return 0
 }
@@ -196,6 +237,17 @@ def has_status_line($want):
               | sub("[[:space:]]+$"; "")) == $want)
       )
   );
+def has_phase_status_line($want):
+  if $want == "" then true
+  else
+    ((. // "") | split("\n") | map(sub("\r$"; "")))
+    | any(. as $l |
+        ($l | test("^[[:space:]]*BRIDGE_PHASE_STATUS:[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*$"))
+        and (($l
+                | sub("^[[:space:]]*BRIDGE_PHASE_STATUS:[[:space:]]+"; "")
+                | sub("[[:space:]]+$"; "")) == $want)
+    )
+  end;
 '
 
 # Shared scratch files for _gh_api results. Reused across iterations so we
@@ -309,13 +361,14 @@ while :; do
   _fetch "repos/$repo/issues/$pr/comments" --paginate
   comments="$api_body"; [ -z "$comments" ] && comments="[]"
   match=$(printf "%s" "$comments" | jq -r \
-    --arg start "$start_iso" --arg author "$author" --arg rid "$run_id" --arg status "$status" \
+    --arg start "$start_iso" --arg author "$author" --arg rid "$run_id" --arg status "$status" --arg pstatus "$phase_status" \
     "$JQ_PRELUDE"'
     (if type == "array" then . else [] end)
     | map(select(.created_at >= $start))
     | map(select($author == "" or .user.login == $author))
     | map(select((.body // "") | has_runid_line($rid)))
     | map(select((.body // "") | has_status_line($status)))
+    | map(select((.body // "") | has_phase_status_line($pstatus)))
     | (first // empty)
     | (.user.login // "?") + "@" + (.created_at // "?")
   ')
@@ -328,7 +381,7 @@ while :; do
   _fetch "repos/$repo/pulls/$pr/reviews" --paginate
   reviews="$api_body"; [ -z "$reviews" ] && reviews="[]"
   match=$(printf "%s" "$reviews" | jq -r \
-    --arg start "$start_iso" --arg author "$author" --arg rid "$run_id" --arg status "$status" \
+    --arg start "$start_iso" --arg author "$author" --arg rid "$run_id" --arg status "$status" --arg pstatus "$phase_status" \
     "$JQ_PRELUDE"'
     (if type == "array" then . else [] end)
     | map(select((.submitted_at // "") >= $start))
@@ -336,6 +389,7 @@ while :; do
     | map(select((.body // "") != ""))
     | map(select((.body // "") | has_runid_line($rid)))
     | map(select((.body // "") | has_status_line($status)))
+    | map(select((.body // "") | has_phase_status_line($pstatus)))
     | (first // empty)
     | (.user.login // "?") + "@" + (.submitted_at // "?")
   ')
@@ -348,13 +402,14 @@ while :; do
   _fetch "repos/$repo/pulls/$pr/comments" --paginate
   inline="$api_body"; [ -z "$inline" ] && inline="[]"
   inline_match_iso=$(printf "%s" "$inline" | jq -r \
-    --arg start "$start_iso" --arg author "$author" --arg rid "$run_id" --arg status "$status" \
+    --arg start "$start_iso" --arg author "$author" --arg rid "$run_id" --arg status "$status" --arg pstatus "$phase_status" \
     "$JQ_PRELUDE"'
     (if type == "array" then . else [] end)
     | map(select(.created_at >= $start))
     | map(select($author == "" or .user.login == $author))
     | map(select((.body // "") | has_runid_line($rid)))
     | map(select((.body // "") | has_status_line($status)))
+    | map(select((.body // "") | has_phase_status_line($pstatus)))
     | sort_by(.created_at)
     | (last // empty)
     | (.created_at // empty)

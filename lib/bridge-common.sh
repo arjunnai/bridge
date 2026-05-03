@@ -11,6 +11,13 @@
 # shellcheck disable=SC2034
 BRIDGE_VERSION="0.1.0"
 
+# Orchestration state (populated by bridge_parse_toml / bridge_apply_defaults).
+BRIDGE_ORCHESTRATOR=""
+BRIDGE_IMPLEMENTER=""
+BRIDGE_REVIEWER=""
+BRIDGE_PHASE_PLAN_FILE=""
+BRIDGE_ORCHESTRATION_PRESENT=0
+
 # ---------- logging ---------------------------------------------------------
 
 if [ -t 2 ]; then
@@ -119,8 +126,9 @@ bridge_parse_toml() {
         section="${line#[}"; section="${section%]}"
         section=$(_bridge_trim "$section")
         case "$section" in
-          agents.*) agent="${section#agents.}" ;;
-          *)        agent="" ;;
+          agents.*)      agent="${section#agents.}" ;;
+          orchestration) BRIDGE_ORCHESTRATION_PRESENT=1; agent="" ;;
+          *)             agent="" ;;
         esac
         continue
         ;;
@@ -154,6 +162,14 @@ bridge_parse_toml() {
           quiet_secs)   BRIDGE_WATCH_QUIET="$val" ;;
         esac
         ;;
+      orchestration)
+        case "$key" in
+          orchestrator)    BRIDGE_ORCHESTRATOR="$val" ;;
+          implementer)     BRIDGE_IMPLEMENTER="$val" ;;
+          reviewer)        BRIDGE_REVIEWER="$val" ;;
+          phase_plan_file) BRIDGE_PHASE_PLAN_FILE="$val" ;;
+        esac
+        ;;
       agents.*)
         case "$key" in
           session)         agent_set "$agent" SESSION         "$val" ;;
@@ -162,6 +178,7 @@ bridge_parse_toml() {
           review_mode)     agent_set "$agent" REVIEW_MODE     "$val" ;;
           prompt_template) agent_set "$agent" PROMPT_TEMPLATE "$val" ;;
           github_login)    agent_set "$agent" GITHUB_LOGIN    "$val" ;;
+          input_mode)      agent_set "$agent" INPUT_MODE      "$val" ;;
         esac
         ;;
     esac
@@ -178,7 +195,17 @@ bridge_apply_defaults() {
   if [ -z "${BRIDGE_CONFIG_USED:-}" ]; then
     for a in codex claude kiro; do
       [ -z "$(agent_get "$a" SESSION)" ] && agent_set "$a" SESSION "$a"
-      [ -z "$(agent_get "$a" COMMAND)" ] && agent_set "$a" COMMAND "$a"
+      if [ -z "$(agent_get "$a" COMMAND)" ]; then
+        if [ "$a" = "kiro" ]; then
+          agent_set "$a" COMMAND "kiro-cli chat --no-interactive --trust-all-tools --model claude-opus-4.6"
+        else
+          agent_set "$a" COMMAND "$a"
+        fi
+      fi
+      # kiro default: stdin mode (one-shot command, bridge-start opens a shell)
+      if [ "$a" = "kiro" ] && [ -z "$(agent_get "$a" INPUT_MODE)" ]; then
+        agent_set "$a" INPUT_MODE "stdin"
+      fi
     done
   fi
   # For every configured agent, fill any missing per-agent defaults (session
@@ -187,6 +214,7 @@ bridge_apply_defaults() {
   for a in $BRIDGE_AGENTS; do
     [ -z "$(agent_get "$a" SESSION)" ] && agent_set "$a" SESSION "$a"
     [ -z "$(agent_get "$a" COMMAND)" ] && agent_set "$a" COMMAND "$a"
+    [ -z "$(agent_get "$a" INPUT_MODE)" ] && agent_set "$a" INPUT_MODE "paste"
     if [ "$(agent_get "$a" ROLE)" = "reviewer" ] && [ -z "$(agent_get "$a" REVIEW_MODE)" ]; then
       agent_set "$a" REVIEW_MODE "adversarial"
     fi
@@ -194,6 +222,7 @@ bridge_apply_defaults() {
   : "${BRIDGE_WATCH_TIMEOUT:=1200}"
   : "${BRIDGE_WATCH_POLL:=10}"
   : "${BRIDGE_WATCH_QUIET:=90}"
+  : "${BRIDGE_PHASE_PLAN_FILE:=BRIDGE_PHASE_PLAN.md}"
   return 0
 }
 
@@ -282,4 +311,91 @@ bridge_iso_to_epoch() {
 
 bridge_now_iso() {
   date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+# ---------- orchestration helpers -------------------------------------------
+
+bridge_orchestration_present() {
+  [ "${BRIDGE_ORCHESTRATION_PRESENT:-0}" -eq 1 ]
+}
+
+bridge_phase_plan_file() {
+  printf "%s\n" "${BRIDGE_PHASE_PLAN_FILE:-BRIDGE_PHASE_PLAN.md}"
+}
+
+# bridge_orchestration_validate — print error messages (one per line) to stdout
+# for each validation failure. Returns 1 if any failures; 0 if valid or no
+# orchestration config present.
+bridge_orchestration_validate() {
+  bridge_orchestration_present || return 0
+  local _errs=0 _a _kiro_role
+
+  if [ -z "$BRIDGE_ORCHESTRATOR" ]; then
+    printf "orchestration.orchestrator is required\n"
+    _errs=$((_errs + 1))
+  else
+    case "$BRIDGE_ORCHESTRATOR" in
+      codex|claude) ;;
+      kiro)
+        printf "orchestration.orchestrator must be codex or claude, not kiro\n"
+        _errs=$((_errs + 1))
+        ;;
+      *)
+        printf "orchestration.orchestrator must be codex or claude, not %s\n" "$BRIDGE_ORCHESTRATOR"
+        _errs=$((_errs + 1))
+        ;;
+    esac
+  fi
+
+  if [ -z "$BRIDGE_IMPLEMENTER" ]; then
+    printf "orchestration.implementer is required\n"
+    _errs=$((_errs + 1))
+  else
+    case "$BRIDGE_IMPLEMENTER" in
+      claude|kiro) ;;
+      codex)
+        printf "orchestration.implementer must be claude or kiro, not codex\n"
+        _errs=$((_errs + 1))
+        ;;
+      *)
+        printf "orchestration.implementer must be claude or kiro, not %s\n" "$BRIDGE_IMPLEMENTER"
+        _errs=$((_errs + 1))
+        ;;
+    esac
+  fi
+
+  if [ -z "$BRIDGE_REVIEWER" ]; then
+    printf "orchestration.reviewer is required\n"
+    _errs=$((_errs + 1))
+  else
+    case "$BRIDGE_REVIEWER" in
+      codex) ;;
+      *)
+        printf "orchestration.reviewer must be codex, not %s\n" "$BRIDGE_REVIEWER"
+        _errs=$((_errs + 1))
+        ;;
+    esac
+  fi
+
+  for _a in "$BRIDGE_ORCHESTRATOR" "$BRIDGE_IMPLEMENTER" "$BRIDGE_REVIEWER"; do
+    [ -z "$_a" ] && continue
+    if ! agent_exists "$_a"; then
+      printf "orchestration references agent '%s' not defined in [agents.*]\n" "$_a"
+      _errs=$((_errs + 1))
+    fi
+  done
+
+  for _a in $BRIDGE_AGENTS; do
+    if [ "$_a" = "kiro" ]; then
+      _kiro_role=$(agent_get kiro ROLE)
+      case "$_kiro_role" in
+        orchestrator|planner)
+          printf "agent 'kiro' must not have role orchestrator or planner\n"
+          _errs=$((_errs + 1))
+          ;;
+      esac
+    fi
+  done
+
+  [ "$_errs" -gt 0 ] && return 1 || return 0
 }

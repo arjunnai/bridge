@@ -10,8 +10,8 @@
 #   2. ./config.toml
 #   3. built-in defaults (codex, claude, kiro all map session=command=name)
 #
-# Schema is intentionally narrow: [github], [watch], [agents.<name>] with
-# string or number values. Anything else is ignored.
+# Schema is intentionally narrow: [github], [watch], [orchestration],
+# [agents.<name>] with string or number values. Anything else is ignored.
 
 [github]
 repo = "OWNER/REPO"
@@ -21,26 +21,31 @@ timeout_secs = 1200
 quiet_secs   = 90
 poll_secs    = 10
 
+[orchestration]
+orchestrator    = "claude"
+implementer     = "kiro"
+reviewer        = "codex"
+phase_plan_file = "BRIDGE_PHASE_PLAN.md"
+
 [agents.codex]
 session         = "codex"
 command         = "codex"
 role            = "reviewer"
-review_mode     = "adversarial"   # MVP default for any reviewer profile.
-                                   # "normal" is parsed but future-facing;
-                                   # MVP behavior remains adversarial.
+review_mode     = "adversarial"
 prompt_template = "templates/reviewer-prompt.md"
-github_login    = "codex-bot"
+github_login    = ""
 
 [agents.claude]
 session         = "claude"
 command         = "claude"
-role            = "implementer"
-prompt_template = "templates/implementer-prompt.md"
-github_login    = "claude-bot"
+role            = "orchestrator"
+prompt_template = "templates/orchestrator-prompt.md"
+github_login    = ""
 
 [agents.kiro]
 session         = "kiro"
-command         = "kiro"
+command         = "kiro-cli chat --no-interactive --trust-all-tools --model claude-opus-4.6"
+input_mode      = "stdin"
 role            = "implementer"
 prompt_template = "templates/implementer-prompt.md"
-github_login    = "kiro-bot"
+github_login    = ""

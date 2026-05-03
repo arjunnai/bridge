@@ -46,7 +46,8 @@ Options:
 Known template placeholders:
   {{BRIDGE_RUN_ID}} {{REPO}} {{PR}} {{SOURCE_AGENT}} {{TARGET_AGENT}}
   {{TARGET_LOGIN}} {{ROLE}} {{REVIEW_MODE}} {{TASK}} {{EXPECTED_OUTPUT}}
-  {{STATUS_MARKER}}
+  {{STATUS_MARKER}} {{PHASE_PLAN_FILE}} {{ORCHESTRATOR}} {{IMPLEMENTER}}
+  {{REVIEWER}}
 EOF
 }
 
@@ -146,17 +147,21 @@ $3
 EOF
 }
 
-prompt=$(_render BRIDGE_RUN_ID    "$run_id"        "$prompt")
-prompt=$(_render REPO             "$repo"          "$prompt")
-prompt=$(_render PR               "$pr"            "$prompt")
-prompt=$(_render SOURCE_AGENT     "$source_agent"  "$prompt")
-prompt=$(_render TARGET_AGENT     "$agent"         "$prompt")
-prompt=$(_render TARGET_LOGIN     "$target_login"  "$prompt")
-prompt=$(_render ROLE             "$role"          "$prompt")
-prompt=$(_render REVIEW_MODE      "$review_mode"   "$prompt")
-prompt=$(_render TASK             "$task"          "$prompt")
-prompt=$(_render EXPECTED_OUTPUT  "$expected"      "$prompt")
-prompt=$(_render STATUS_MARKER    "$status_marker" "$prompt")
+prompt=$(_render BRIDGE_RUN_ID    "$run_id"                          "$prompt")
+prompt=$(_render REPO             "$repo"                            "$prompt")
+prompt=$(_render PR               "$pr"                              "$prompt")
+prompt=$(_render SOURCE_AGENT     "$source_agent"                    "$prompt")
+prompt=$(_render TARGET_AGENT     "$agent"                           "$prompt")
+prompt=$(_render TARGET_LOGIN     "$target_login"                    "$prompt")
+prompt=$(_render ROLE             "$role"                            "$prompt")
+prompt=$(_render REVIEW_MODE      "$review_mode"                     "$prompt")
+prompt=$(_render TASK             "$task"                            "$prompt")
+prompt=$(_render EXPECTED_OUTPUT  "$expected"                        "$prompt")
+prompt=$(_render STATUS_MARKER    "$status_marker"                   "$prompt")
+prompt=$(_render PHASE_PLAN_FILE  "$(bridge_phase_plan_file)"        "$prompt")
+prompt=$(_render ORCHESTRATOR     "${BRIDGE_ORCHESTRATOR:-}"         "$prompt")
+prompt=$(_render IMPLEMENTER      "${BRIDGE_IMPLEMENTER:-}"          "$prompt")
+prompt=$(_render REVIEWER         "${BRIDGE_REVIEWER:-}"             "$prompt")
 
 if [ "$strict" -eq 1 ]; then
   case "$prompt" in
@@ -197,14 +202,41 @@ fi
 tmux has-session -t "$session" 2>/dev/null \
   || die "tmux session not found: $session (try: bridge-start $agent)"
 
-# Named tmux buffer to avoid collisions with other concurrent nudges.
-buffer="bridge-${agent}-$$-$(date +%s)"
-tmux set-buffer -b "$buffer" -- "$prompt"
-tmux paste-buffer -b "$buffer" -p -t "$session"
-sleep 0.4
-tmux send-keys -t "$session" Enter
-tmux delete-buffer -b "$buffer" 2>/dev/null || true
+input_mode=$(agent_get "$agent" INPUT_MODE)
+agent_command=$(agent_get "$agent" COMMAND)
+
+if [ "$input_mode" = "stdin" ]; then
+  _stdin_head="${agent_command%% *}"
+  command -v "$_stdin_head" >/dev/null 2>&1 \
+    || die "stdin-mode agent $agent: command '$_stdin_head' not found in PATH (install it or fix config)"
+fi
 
 bytes=${#prompt}
 if [ "$include_header" -eq 1 ]; then header_state=on; else header_state=off; fi
-log_ok "nudged $agent (session=$session run=$run_id bytes=$bytes header=$header_state)"
+
+if [ "$input_mode" = "stdin" ]; then
+  # One-shot agents: write rendered prompt to a temp file and paste the
+  # invocation command into the shell session. The shell runs the agent
+  # command with the prompt on stdin, then removes the temp file.
+  _prompt_file=$(mktemp /tmp/bridge-prompt-XXXXXX)
+  printf "%s" "$prompt" > "$_prompt_file"
+  _invoke="${agent_command} < ${_prompt_file}; rm -f ${_prompt_file}"
+  buffer="bridge-${agent}-$$-$(date +%s)"
+  tmux set-buffer -b "$buffer" -- "$_invoke"
+  tmux paste-buffer -b "$buffer" -p -t "$session"
+  sleep 0.4
+  tmux send-keys -t "$session" Enter
+  tmux delete-buffer -b "$buffer" 2>/dev/null || true
+  log_ok "nudged $agent (session=$session run=$run_id bytes=$bytes header=$header_state mode=stdin)"
+else
+  # Named tmux buffer to avoid collisions with other concurrent nudges.
+  buffer="bridge-${agent}-$$-$(date +%s)"
+  tmux set-buffer -b "$buffer" -- "$prompt"
+  tmux paste-buffer -b "$buffer" -p -t "$session"
+  sleep 0.4
+  tmux send-keys -t "$session" Enter
+  tmux delete-buffer -b "$buffer" 2>/dev/null || true
+  log_ok "nudged $agent (session=$session run=$run_id bytes=$bytes header=$header_state mode=paste)"
+fi
+
+printf "BRIDGE_RUN_ID=%s\n" "$run_id" >&2

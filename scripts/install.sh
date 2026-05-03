@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — symlink (or copy) bin/bridge-* into a user bin directory.
+# install.sh — symlink (or copy) bin/bridge and bin/bridge-* into a user bin directory.
 # Default target: $HOME/.local/bin. Honors INSTALL_DIR and PREFIX.
 # Does NOT mutate shell rc files.
 #
@@ -12,7 +12,7 @@ usage() {
   cat <<EOF
 usage: scripts/install.sh [options]
 
-Installs the bridge-* commands into a user bin directory by symlinking
+Installs the bridge command and bridge-* commands into a user bin directory by symlinking
 (default) or copying. Does not modify shell rc files.
 
 Target directory resolution:
@@ -76,7 +76,7 @@ fi
 
 installed=0
 skipped=0
-for f in "$src"/bin/bridge-*; do
+for f in "$src"/bin/bridge "$src"/bin/bridge-*; do
   [ -e "$f" ] || continue
   name=$(basename "$f")
   dest="$install_dir/$name"

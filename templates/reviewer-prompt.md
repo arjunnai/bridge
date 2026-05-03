@@ -6,7 +6,8 @@ REVIEW_MODE: {{REVIEW_MODE}}
 REPO: {{REPO}}
 PR: {{PR}}
 TASK: {{TASK}}
-EXPECTED_OUTPUT: A durable GitHub PR review with material adversarial findings, if any, and exactly one final BRIDGE_STATUS line.
+PHASE_PLAN_FILE: {{PHASE_PLAN_FILE}}
+EXPECTED_OUTPUT: A durable GitHub PR review with material adversarial findings, if any, and exactly one final BRIDGE_STATUS line. On approval, also include BRIDGE_PHASE_STATUS: completed.
 STATUS_MARKER: BRIDGE_STATUS: approved  OR  BRIDGE_STATUS: changes_requested
 
 <role>
@@ -32,6 +33,7 @@ Your only job is to inspect the PR and post durable GitHub review feedback.
 
 <inputs_to_read_first>
 Inspect the durable GitHub context before reviewing:
+- {{PHASE_PLAN_FILE}} (read this first — review must check implementation against the plan)
 - PR title and body
 - full PR diff and changed files
 - commits on the PR branch
@@ -112,8 +114,10 @@ BRIDGE_STATUS: changes_requested
 Use approval only if you cannot support any substantive adversarial finding from the available context:
 BRIDGE_RUN_ID: {{BRIDGE_RUN_ID}}
 BRIDGE_STATUS: approved
+BRIDGE_PHASE_STATUS: completed
 
 The bridge counts only explicit BRIDGE_STATUS markers. "Looks good" is not a status.
+Do not include BRIDGE_PHASE_STATUS: completed unless you are approving.
 </github_output_contract>
 
 <final_check>
@@ -125,5 +129,8 @@ Before finalizing, check that each finding is:
 
 Then make sure the review body ends with exactly one of:
 BRIDGE_STATUS: changes_requested
+
+or (on approval only):
 BRIDGE_STATUS: approved
+BRIDGE_PHASE_STATUS: completed
 </final_check>

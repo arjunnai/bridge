@@ -1,5 +1,5 @@
 <p align="center">
-  <strong>codex-bridge</strong>
+  <img src="assets/bridge-logo.png" alt="codex-bridge" width="480">
 </p>
 
 <h1 align="center">Local agents. Durable PR state.</h1>
@@ -118,20 +118,20 @@ The installer never edits shell rc files. If the target directory is not on
 
 ```bash
 # 1. Check local tools, GitHub auth, repo detection, config, and sessions.
-bridge-doctor
+bridge doctor
 
 # 2. Optional: configure explicit profiles.
 cp config.example.toml config.toml
 $EDITOR config.toml
 
 # 3. Start all configured or built-in sessions.
-bridge-start
+bridge start
 
 # 4. Nudge an implementer.
-bridge-nudge claude "Implement X. Open or update a PR. Include BRIDGE_STATUS."
+bridge nudge claude "Implement X. Open or update a PR. Include BRIDGE_STATUS."
 
 # 5. Wait for Codex review approval.
-bridge-watch 42 --agent codex --status approved
+bridge watch 42 --agent codex --status approved
 ```
 
 ## Workflow
@@ -150,6 +150,15 @@ bridge-start  -> keep agent CLIs alive
 bridge-nudge  -> wake one agent with a structured prompt
 bridge-watch  -> wait for explicit PR markers
 bridge-doctor -> diagnose local setup
+```
+
+The `bridge` dispatcher is equivalent:
+
+```text
+bridge start   -> bridge-start
+bridge nudge   -> bridge-nudge
+bridge watch   -> bridge-watch
+bridge doctor  -> bridge-doctor
 ```
 
 Phase-based orchestration is the next product step. The MVP already includes
@@ -197,6 +206,10 @@ Supported template placeholders:
 | `{{TASK}}` | Task text. |
 | `{{EXPECTED_OUTPUT}}` | Expected durable result. |
 | `{{STATUS_MARKER}}` | Required status marker. |
+| `{{PHASE_PLAN_FILE}}` | Phase plan file path (from `[orchestration]` or default). |
+| `{{ORCHESTRATOR}}` | Configured orchestrator agent name. |
+| `{{IMPLEMENTER}}` | Configured implementer agent name. |
+| `{{REVIEWER}}` | Configured reviewer agent name. |
 
 Use `--strict-template` to fail if placeholders remain unfilled.
 
@@ -243,7 +256,127 @@ bridge-doctor
 ```
 
 Checks required tools, `gh` auth, repo detection, config health, agent command
-availability, and tmux session status. Exits non-zero only on hard failures.
+availability, tmux session status, and **orchestration config validity**.
+Invalid `[orchestration]` config is a hard failure. Exits non-zero on hard failures.
+
+---
+
+## Phase Orchestration (v1)
+
+v1 adds a first-class orchestrator/planner phase before implementation.
+No daemon. No hosted service. No automatic merge.
+
+### How it works
+
+```text
+orchestrator -> BRIDGE_PHASE_PLAN.md -> implementer -> PR -> Codex review -> fixes -> Codex approval
+```
+
+- **Orchestrator** (Claude or Codex) reads the task, writes a durable `BRIDGE_PHASE_PLAN.md`, and posts `BRIDGE_STATUS: plan_ready`.
+- **Implementer** (Claude or Kiro) reads the plan and implements. Posts `BRIDGE_STATUS: implementation_ready`.
+- **Reviewer** (Codex, always adversarial) reads the plan and the PR. Posts either `BRIDGE_STATUS: changes_requested` or `BRIDGE_STATUS: approved` + `BRIDGE_PHASE_STATUS: completed`.
+- A phase ends only after Codex posts **both** markers.
+
+**Kiro never plans.** Kiro is implementer/validator only.
+
+### Config
+
+```toml
+[orchestration]
+orchestrator    = "claude"
+implementer     = "kiro"
+reviewer        = "codex"
+phase_plan_file = "BRIDGE_PHASE_PLAN.md"
+
+[agents.claude]
+session         = "claude"
+command         = "claude"
+role            = "orchestrator"
+prompt_template = "templates/orchestrator-prompt.md"
+
+[agents.kiro]
+session         = "kiro"
+command         = "kiro-cli chat --no-interactive --trust-all-tools --model claude-opus-4.6"
+role            = "implementer"
+prompt_template = "templates/implementer-prompt.md"
+
+[agents.codex]
+session         = "codex"
+command         = "codex"
+role            = "reviewer"
+review_mode     = "adversarial"
+prompt_template = "templates/reviewer-prompt.md"
+```
+
+Invalid orchestration config is a hard failure in `bridge-doctor`.
+
+### Example A: Claude orchestrates, Kiro implements, Codex reviews
+
+```bash
+bridge-start
+
+export BRIDGE_RUN_ID="$(
+  bin/bridge-nudge claude \
+    --template templates/orchestrator-prompt.md \
+    --task "Plan phase 1" \
+    --pr 42 \
+    2>&1 | awk -F= '/^BRIDGE_RUN_ID=/{print $2}'
+)"
+
+bin/bridge-watch 42 --status plan_ready --run-id "$BRIDGE_RUN_ID"
+
+bin/bridge-nudge kiro \
+  --template templates/implementer-prompt.md \
+  --run-id "$BRIDGE_RUN_ID" \
+  --task "Implement the phase in BRIDGE_PHASE_PLAN.md" \
+  --pr 42
+
+bin/bridge-watch 42 --status implementation_ready --run-id "$BRIDGE_RUN_ID"
+
+bin/bridge-nudge codex \
+  --template templates/reviewer-prompt.md \
+  --run-id "$BRIDGE_RUN_ID" \
+  --pr 42
+
+bin/bridge-watch 42 --status approved --phase-status completed --run-id "$BRIDGE_RUN_ID"
+```
+
+### Example B: Codex orchestrates, Claude implements, Codex reviews
+
+Codex may plan and later review the same phase. Codex must not implement.
+Implementation must be done by Claude or Kiro. Codex must not approve code it
+implemented itself.
+
+```bash
+bridge-start
+
+export BRIDGE_RUN_ID="$(
+  bin/bridge-nudge codex \
+    --template templates/orchestrator-prompt.md \
+    --task "Plan phase 1" \
+    --pr 42 \
+    2>&1 | awk -F= '/^BRIDGE_RUN_ID=/{print $2}'
+)"
+
+bin/bridge-watch 42 --status plan_ready --run-id "$BRIDGE_RUN_ID"
+
+bin/bridge-nudge claude \
+  --template templates/implementer-prompt.md \
+  --run-id "$BRIDGE_RUN_ID" \
+  --task "Implement the phase in BRIDGE_PHASE_PLAN.md" \
+  --pr 42
+
+bin/bridge-watch 42 --status implementation_ready --run-id "$BRIDGE_RUN_ID"
+
+bin/bridge-nudge codex \
+  --template templates/reviewer-prompt.md \
+  --run-id "$BRIDGE_RUN_ID" \
+  --pr 42
+
+bin/bridge-watch 42 --status approved --phase-status completed --run-id "$BRIDGE_RUN_ID"
+```
+
+---
 
 ## Configuration
 
@@ -315,16 +448,24 @@ BRIDGE_STATUS: approved
 
 ## Status markers
 
-Accepted MVP statuses:
-
 | Status | Typical source |
 | --- | --- |
+| `plan_ready` | Orchestrator finished writing the phase plan. |
 | `implementation_ready` | Implementer says PR is ready for review. |
 | `fixes_pushed` | Implementer says requested fixes are pushed. |
 | `changes_requested` | Reviewer found material issues. |
 | `approved` | Reviewer approves current PR state. |
 | `validated` | Validator confirms requested state. |
 | `validation_failed` | Validator found unresolved work. |
+
+Phase completion requires both:
+
+```text
+BRIDGE_STATUS: approved
+BRIDGE_PHASE_STATUS: completed
+```
+
+Only Codex posts `BRIDGE_PHASE_STATUS: completed`. Do not include it in changes-requested reviews.
 
 Automation ignores vague text such as `done`, `looks good`, or `LGTM`.
 
@@ -350,14 +491,15 @@ bridge-nudge codex --template templates/reviewer-prompt.md \
 
 bridge-watch 42 --agent codex \
                 --run-id "$RUN_ID" \
-                --status approved
+                --status approved \
+                --phase-status completed
 ```
 
 ## Troubleshooting
 
 | Symptom | Fix |
 | --- | --- |
-| `tmux session not found` | Run `bridge-start <agent>`. |
+| `tmux session not found` | Run `bridge start <agent>`. |
 | `gh not authenticated` | Run `gh auth login`. |
 | `could not resolve GitHub repo` | Set `BRIDGE_REPO=OWNER/REPO` or pass `--repo`. |
 | Watch times out after agent posted output | Ensure the comment has `BRIDGE_STATUS:` and, when filtered, exact `BRIDGE_RUN_ID:`. |

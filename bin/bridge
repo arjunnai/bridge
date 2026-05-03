@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# bridge — small dispatcher for bridge-* commands.
+set -eu
+
+_BRIDGE_BIN_DIR=$(cd "$(dirname "$0")" && pwd)
+if [ -L "$0" ]; then
+  _real=$(readlink "$0")
+  case "$_real" in
+    /*) ;;
+    *) _real="$_BRIDGE_BIN_DIR/$_real" ;;
+  esac
+  _BRIDGE_BIN_DIR=$(cd "$(dirname "$_real")" && pwd)
+fi
+
+usage() {
+  cat <<EOF
+usage: bridge <command> [options]
+
+Commands:
+  start    Start tmux sessions for one or all configured agents.
+  nudge    Send a prompt to an agent session.
+  watch    Wait for explicit BRIDGE_STATUS markers on a PR.
+  doctor   Diagnose local tools, config, repo, and sessions.
+
+Examples:
+  bridge doctor
+  bridge start
+  bridge nudge claude "Implement X"
+  bridge watch 42 --status approved
+
+Legacy command names still work:
+  bridge-start, bridge-nudge, bridge-watch, bridge-doctor
+EOF
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  -h|--help|'')
+    usage
+    exit 0
+    ;;
+  start|nudge|watch|doctor)
+    shift
+    exec "$_BRIDGE_BIN_DIR/bridge-$cmd" "$@"
+    ;;
+  *)
+    echo "unknown bridge command: $cmd" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

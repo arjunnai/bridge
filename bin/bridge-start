@@ -47,12 +47,14 @@ fi
 
 started=0
 already=0
-missing=0
+cmd_missing=0
+dead=0
 
 for a in $targets; do
   agent_exists "$a" || die "unknown agent: $a (configured: $BRIDGE_AGENTS)"
   session=$(agent_get "$a" SESSION)
   command=$(agent_get "$a" COMMAND)
+  input_mode=$(agent_get "$a" INPUT_MODE)
   [ -n "$session" ] || die "agent $a missing 'session'"
   [ -n "$command" ] || die "agent $a missing 'command'"
 
@@ -64,14 +66,45 @@ for a in $targets; do
 
   head=${command%% *}
   if ! command -v "$head" >/dev/null 2>&1; then
-    log_warn "$a: '$head' not in PATH — starting anyway, tmux will surface the error"
-    missing=$((missing + 1))
+    if [ "$input_mode" = "stdin" ]; then
+      # stdin-mode: bridge-nudge invokes the command at prompt time.
+      # Missing command means nudge will silently fail — hard failure here.
+      log_err "$a: '$head' not in PATH — stdin-mode agent requires command at start time"
+      dead=$((dead + 1))
+      continue
+    else
+      log_warn "$a: '$head' not in PATH — starting anyway, tmux will surface the error"
+      cmd_missing=$((cmd_missing + 1))
+    fi
   fi
 
-  # Preserve full command string (with arguments) by passing as a single arg.
-  tmux new-session -d -s "$session" "$command"
-  log_ok "$a: started tmux session '$session' -> $command"
+  if [ "$input_mode" = "stdin" ]; then
+    # One-shot agents (e.g. kiro --no-interactive) exit immediately when started
+    # with no prompt. Start a persistent shell instead; bridge-nudge will invoke
+    # the agent command with the rendered prompt piped to stdin.
+    tmux new-session -d -s "$session" "${SHELL:-/bin/bash}"
+  else
+    # Preserve full command string (with arguments) by passing as a single arg.
+    tmux new-session -d -s "$session" "$command"
+  fi
+
+  # Post-start liveness check: do NOT report success until session is confirmed
+  # alive. A command that exits immediately is a hard failure, not a warning.
+  sleep 0.5
+  if ! tmux has-session -t "$session" 2>/dev/null; then
+    log_err "$a: session '$session' exited immediately after start (check command: $command)"
+    dead=$((dead + 1))
+    continue
+  fi
+
+  if [ "$input_mode" = "stdin" ]; then
+    log_ok "$a: started tmux session '$session' (shell, stdin mode) -> $command"
+  else
+    log_ok "$a: started tmux session '$session' -> $command"
+  fi
   started=$((started + 1))
 done
 
-log_info "summary: started=$started already=$already command_missing=$missing"
+log_info "summary: started=$started already=$already cmd_missing=$cmd_missing dead=$dead"
+[ "$dead" -gt 0 ] && exit 1
+exit 0

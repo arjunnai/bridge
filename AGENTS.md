@@ -51,15 +51,14 @@ prompt_template = "templates/reviewer-prompt.md"
 github_login = "codex-bot"
 ````
 
-The bridge should not assume that a specific agent always performs a specific role.
+**v1 role rules:**
 
-Codex can review, orchestrate, or implement.
+- Codex or Claude can orchestrate. Kiro must never orchestrate or plan.
+- Codex is the required adversarial reviewer in v1.
+- Claude or Kiro implement. Codex must not implement in the v1 phase workflow.
+- Kiro is implementer/validator only.
 
-Claude can implement, review, or validate.
-
-Kiro can implement or validate.
-
-Roles are assigned per run.
+Roles are assigned per run via `[orchestration]` config.
 
 ---
 
@@ -304,20 +303,13 @@ A review or comment should not be considered valid unless it matches the current
 
 ## Required Status Markers
 
-Agents should use explicit status markers.
+Agents must use explicit status markers.
 
-Reviewer statuses:
-
-```text
-BRIDGE_RUN_ID: <id>
-BRIDGE_STATUS: changes_requested
-```
-
-or:
+Orchestrator statuses:
 
 ```text
 BRIDGE_RUN_ID: <id>
-BRIDGE_STATUS: approved
+BRIDGE_STATUS: plan_ready
 ```
 
 Implementer statuses:
@@ -333,6 +325,25 @@ or:
 BRIDGE_RUN_ID: <id>
 BRIDGE_STATUS: fixes_pushed
 ```
+
+Reviewer statuses (changes requested):
+
+```text
+BRIDGE_RUN_ID: <id>
+BRIDGE_STATUS: changes_requested
+```
+
+Reviewer statuses (approval — phase complete):
+
+```text
+BRIDGE_RUN_ID: <id>
+BRIDGE_STATUS: approved
+BRIDGE_PHASE_STATUS: completed
+```
+
+`BRIDGE_PHASE_STATUS: completed` must only be posted by Codex on approval.
+A phase ends only after Codex posts both `BRIDGE_STATUS: approved` and
+`BRIDGE_PHASE_STATUS: completed`.
 
 Validator statuses:
 

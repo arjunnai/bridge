@@ -71,6 +71,21 @@ else
   warn "no config.toml found — using built-in defaults (codex, claude, kiro)"
 fi
 
+# Orchestration.
+if bridge_orchestration_present; then
+  _orch_errors=$(bridge_orchestration_validate)
+  if [ -z "$_orch_errors" ]; then
+    ok "orchestration: orchestrator=${BRIDGE_ORCHESTRATOR} implementer=${BRIDGE_IMPLEMENTER} reviewer=${BRIDGE_REVIEWER} phase_plan_file=$(bridge_phase_plan_file)"
+  else
+    _IFS="$IFS"; IFS='
+'
+    for _e in $_orch_errors; do
+      [ -n "$_e" ] && fail "$_e"
+    done
+    IFS="$_IFS"
+  fi
+fi
+
 # Watch timing.
 log_info "watch: timeout=${BRIDGE_WATCH_TIMEOUT}s poll=${BRIDGE_WATCH_POLL}s quiet=${BRIDGE_WATCH_QUIET}s"
 
