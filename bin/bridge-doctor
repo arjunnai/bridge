@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# bridge-doctor — validate local environment for codex-bridge.
+set -u
+
+_BRIDGE_BIN_DIR=$(cd "$(dirname "$0")" && pwd)
+if [ -L "$0" ]; then
+  _real=$(readlink "$0")
+  case "$_real" in
+    /*) ;;
+    *) _real="$_BRIDGE_BIN_DIR/$_real" ;;
+  esac
+  _BRIDGE_BIN_DIR=$(cd "$(dirname "$_real")" && pwd)
+fi
+_BRIDGE_LIB_DIR="$_BRIDGE_BIN_DIR/../lib"
+# shellcheck source=lib/bridge-common.sh disable=SC1091
+. "$_BRIDGE_LIB_DIR/bridge-common.sh"
+
+usage() {
+  cat <<EOF
+usage: bridge-doctor
+
+Validates the local environment for codex-bridge. Reports PASS / WARN / FAIL.
+Exits non-zero only on hard failures (missing required tools).
+EOF
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
+
+bridge_load
+
+passes=0; warns=0; fails=0
+ok()   { passes=$((passes + 1)); log_ok   "$*"; }
+warn() { warns=$((warns + 1));   log_warn "$*"; }
+fail() { fails=$((fails + 1));   log_err  "$*"; }
+
+# Required tools.
+for t in bash tmux gh jq; do
+  if command -v "$t" >/dev/null 2>&1; then ok "$t installed"; else fail "$t not installed"; fi
+done
+# Recommended.
+if command -v git >/dev/null 2>&1; then ok "git installed"; else warn "git not installed (PR detection will fall back to BRIDGE_REPO)"; fi
+# Optional.
+if command -v shellcheck >/dev/null 2>&1; then ok "shellcheck installed"; else warn "shellcheck not installed (optional, used for lint)"; fi
+
+# gh auth.
+if command -v gh >/dev/null 2>&1; then
+  if gh auth status >/dev/null 2>&1; then ok "gh authenticated"; else warn "gh not authenticated (run: gh auth login)"; fi
+fi
+
+# Git repo.
+if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+  ok "git repo: $(git rev-parse --show-toplevel)"
+else
+  warn "no git repo at $(pwd) — bridge-watch will need --repo or BRIDGE_REPO"
+fi
+
+# Repo detection.
+detected=$(bridge_resolve_repo 2>/dev/null || true)
+if [ -n "$detected" ]; then
+  ok "GitHub repo: $detected"
+else
+  warn "GitHub repo not detected (set BRIDGE_REPO or run inside a gh-aware repo)"
+fi
+
+# Config.
+if [ -n "${BRIDGE_CONFIG_USED:-}" ]; then
+  ok "config: $BRIDGE_CONFIG_USED"
+else
+  warn "no config.toml found — using built-in defaults (codex, claude, kiro)"
+fi
+
+# Watch timing.
+log_info "watch: timeout=${BRIDGE_WATCH_TIMEOUT}s poll=${BRIDGE_WATCH_POLL}s quiet=${BRIDGE_WATCH_QUIET}s"
+
+# Agents.
+log_info "agents: $BRIDGE_AGENTS"
+for a in $BRIDGE_AGENTS; do
+  s=$(agent_get "$a" SESSION)
+  c=$(agent_get "$a" COMMAND)
+  l=$(agent_get "$a" GITHUB_LOGIN)
+  head=${c%% *}
+  if [ -n "$head" ] && command -v "$head" >/dev/null 2>&1; then
+    ok "agent $a: command '$head' found"
+  else
+    warn "agent $a: command '$head' not in PATH (start: bridge-start $a will surface tmux error)"
+  fi
+  if command -v tmux >/dev/null 2>&1 && tmux has-session -t "$s" 2>/dev/null; then
+    ok "agent $a: tmux session '$s' running"
+  else
+    warn "agent $a: tmux session '$s' not running (start: bridge-start $a)"
+  fi
+  [ -n "$l" ] && log_info "agent $a: github_login=$l"
+done
+
+log_info "summary: pass=$passes warn=$warns fail=$fails"
+[ "$fails" -gt 0 ] && exit 1
+exit 0

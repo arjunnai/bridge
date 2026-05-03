@@ -1,0 +1,46 @@
+# config.example.toml — copy to config.toml to enable.
+# codex-bridge intentionally REFUSES to load this file at runtime; copy it
+# first:
+#
+#   cp config.example.toml config.toml
+#   $EDITOR config.toml
+#
+# Discovery order at runtime:
+#   1. $BRIDGE_CONFIG (explicit path)
+#   2. ./config.toml
+#   3. built-in defaults (codex, claude, kiro all map session=command=name)
+#
+# Schema is intentionally narrow: [github], [watch], [agents.<name>] with
+# string or number values. Anything else is ignored.
+
+[github]
+repo = "OWNER/REPO"
+
+[watch]
+timeout_secs = 1200
+quiet_secs   = 90
+poll_secs    = 10
+
+[agents.codex]
+session         = "codex"
+command         = "codex"
+role            = "reviewer"
+review_mode     = "adversarial"   # MVP default for any reviewer profile.
+                                   # "normal" is parsed but future-facing;
+                                   # MVP behavior remains adversarial.
+prompt_template = "templates/reviewer-prompt.md"
+github_login    = "codex-bot"
+
+[agents.claude]
+session         = "claude"
+command         = "claude"
+role            = "implementer"
+prompt_template = "templates/implementer-prompt.md"
+github_login    = "claude-bot"
+
+[agents.kiro]
+session         = "kiro"
+command         = "kiro"
+role            = "implementer"
+prompt_template = "templates/implementer-prompt.md"
+github_login    = "kiro-bot"

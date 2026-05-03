@@ -1,0 +1,397 @@
+#!/usr/bin/env bash
+# bridge-watch — wait for explicit BRIDGE_STATUS markers on a GitHub PR.
+set -eu
+
+_BRIDGE_BIN_DIR=$(cd "$(dirname "$0")" && pwd)
+if [ -L "$0" ]; then
+  _real=$(readlink "$0")
+  case "$_real" in
+    /*) ;;
+    *) _real="$_BRIDGE_BIN_DIR/$_real" ;;
+  esac
+  _BRIDGE_BIN_DIR=$(cd "$(dirname "$_real")" && pwd)
+fi
+_BRIDGE_LIB_DIR="$_BRIDGE_BIN_DIR/../lib"
+# shellcheck source=lib/bridge-common.sh disable=SC1091
+. "$_BRIDGE_LIB_DIR/bridge-common.sh"
+
+usage() {
+  cat <<EOF
+usage: bridge-watch <pr> [options]
+
+Watches GitHub PR activity (PR body, issue comments, reviews, inline review
+comments, and commits) and exits 0 only when an explicit BRIDGE_STATUS:<value>
+marker that satisfies all configured filters appears in a comment, review,
+or PR body.
+
+Notes:
+  - Comments and reviews are the preferred completion channel.
+  - PR body uses coarse 'updated_at' semantics; less precise than comments
+    and reviews.
+  - Commit messages are inspected and logged for visibility but do NOT
+    complete the watch — agents must re-post the marker in a review or
+    comment.
+
+Hard failures (exit 1, no retry):
+  - GitHub auth (HTTP 401), permission/rate-limit (HTTP 403), missing
+    PR/repo (HTTP 404), and other non-transient gh api errors.
+Transient failures (HTTP 5xx, network) are logged and retried until
+--timeout.
+
+Options:
+  --repo OWNER/REPO     GitHub repo (else gh-detected or \$BRIDGE_REPO)
+  --agent AGENT         match author to agent's configured github_login
+  --author LOGIN        match author to this GitHub login
+  --run-id ID           require BRIDGE_RUN_ID match
+  --status VALUE        require BRIDGE_STATUS:<value> match (any if omitted)
+  --timeout SECONDS     overall timeout (default: \$BRIDGE_WATCH_TIMEOUT or 1200)
+  --poll SECONDS        poll interval (default: \$BRIDGE_WATCH_POLL or 10)
+  --quiet SECONDS       inline-only quiet window (default: \$BRIDGE_WATCH_QUIET or 90)
+  -h, --help            show this help
+EOF
+}
+
+pr=""; repo=""; agent=""; author=""; run_id=""; status=""
+timeout=""; poll=""; quiet=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --repo)    repo="${2:?--repo requires value}"; shift 2 ;;
+    --agent)   agent="${2:?--agent requires value}"; shift 2 ;;
+    --author)  author="${2:?--author requires value}"; shift 2 ;;
+    --run-id)  run_id="${2:?--run-id requires value}"; shift 2 ;;
+    --status)  status="${2:?--status requires value}"; shift 2 ;;
+    --timeout) timeout="${2:?--timeout requires value}"; shift 2 ;;
+    --poll)    poll="${2:?--poll requires value}"; shift 2 ;;
+    --quiet)   quiet="${2:?--quiet requires value}"; shift 2 ;;
+    --) shift; break ;;
+    -*) die "unknown flag: $1 (try --help)" ;;
+    *)
+      [ -z "$pr" ] || die "extra positional argument: $1"
+      pr="$1"; shift
+      ;;
+  esac
+done
+
+[ -n "$pr" ] || { usage >&2; exit 2; }
+case "$pr" in
+  ''|*[!0-9]*) die "PR must be a positive integer (got: $pr)" ;;
+esac
+
+bridge_load
+require_cmd gh
+require_cmd jq
+
+[ -z "$timeout" ] && timeout="$BRIDGE_WATCH_TIMEOUT"
+[ -z "$poll" ]    && poll="$BRIDGE_WATCH_POLL"
+[ -z "$quiet" ]   && quiet="$BRIDGE_WATCH_QUIET"
+
+# Resolve repo.
+if [ -z "$repo" ]; then
+  repo=$(bridge_resolve_repo) || die "could not resolve GitHub repo (use --repo or set BRIDGE_REPO)"
+fi
+
+# Map --agent -> github_login if --author not supplied. Hard-fail if the
+# agent has no github_login: silently degrading to "any author" would let a
+# human, a different bot, or a stale Claude review satisfy
+# `bridge-watch --agent codex --status approved`, which violates the
+# wrong-author-must-not-trigger invariant.
+if [ -z "$author" ] && [ -n "$agent" ]; then
+  agent_exists "$agent" || die "unknown agent: $agent"
+  author=$(agent_get "$agent" GITHUB_LOGIN)
+  if [ -z "$author" ]; then
+    die "agent '$agent' has no github_login configured; pass --author <login> or set [agents.$agent].github_login in config.toml"
+  fi
+fi
+
+# Validate --status as a strict identifier so the value never leaks into a
+# regex with metacharacters and so prefix-matching is impossible.
+if [ -n "$status" ]; then
+  if ! printf "%s" "$status" | LC_ALL=C grep -E -q '^[A-Za-z_][A-Za-z0-9_]*$'; then
+    die "--status must match [A-Za-z_][A-Za-z0-9_]* (got: $status)"
+  fi
+fi
+
+start_epoch=$(date -u +%s)
+deadline=$((start_epoch + timeout))
+start_iso=$(bridge_now_iso)
+
+log_info "watching $repo PR #$pr  (timeout=${timeout}s poll=${poll}s quiet=${quiet}s)"
+[ -n "$author" ] && log_info "filter: author=$author"
+[ -n "$run_id" ] && log_info "filter: run_id=$run_id"
+[ -n "$status" ] && log_info "filter: status=$status"
+log_info "watch start = $start_iso"
+
+# Exact-line marker matchers. A marker is a line of the form:
+#   BRIDGE_RUN_ID: <value>     (value = non-whitespace run, compared exact)
+#   BRIDGE_STATUS: <name>      (name  = [A-Za-z_][A-Za-z0-9_]*)
+# Substring/prefix matches are explicitly rejected so that a stale or
+# qualified marker (e.g. "BRIDGE_RUN_ID: bridge-abc-extra" or
+# "BRIDGE_STATUS: approved-extra") cannot satisfy --run-id bridge-abc /
+# --status approved.
+
+_has_runid_line() {
+  # _has_runid_line <body> <expected-runid>; rc 0 if exact match present.
+  printf "%s\n" "$1" | awk -v want="$2" '
+    /^[[:space:]]*BRIDGE_RUN_ID:[[:space:]]+/ {
+      v = $0
+      sub(/^[[:space:]]*BRIDGE_RUN_ID:[[:space:]]+/, "", v)
+      sub(/[[:space:]]+$/, "", v)
+      if (v == want) { found = 1 }
+    }
+    END { exit found ? 0 : 1 }
+  '
+}
+
+_has_status_line() {
+  # _has_status_line <body> <expected-status-or-empty>; rc 0 if a strict
+  # BRIDGE_STATUS line is present and (when expected is non-empty) equals
+  # it exactly. Status name is restricted to [A-Za-z_][A-Za-z0-9_]*.
+  printf "%s\n" "$1" | awk -v want="$2" '
+    /^[[:space:]]*BRIDGE_STATUS:[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*$/ {
+      v = $0
+      sub(/^[[:space:]]*BRIDGE_STATUS:[[:space:]]+/, "", v)
+      sub(/[[:space:]]+$/, "", v)
+      if (want == "" || v == want) { found = 1 }
+    }
+    END { exit found ? 0 : 1 }
+  '
+}
+
+_body_matches() {
+  # _body_matches "<body>" -> 0 if all filters pass, 1 otherwise.
+  local body="$1"
+  [ -n "$body" ] || return 1
+  _has_status_line "$body" "$status" || return 1
+  if [ -n "$run_id" ]; then
+    _has_runid_line "$body" "$run_id" || return 1
+  fi
+  return 0
+}
+
+# jq prelude: exact-line versions of the same checks for use inside jq
+# pipelines that scan arrays (comments, reviews, inline, commits).
+# shellcheck disable=SC2016  # jq program — single quotes intentional, $rid/$status are jq args
+JQ_PRELUDE='
+def has_runid_line($want):
+  if $want == "" then true
+  else
+    ((. // "") | split("\n") | map(sub("\r$"; "")))
+    | any(. as $l |
+        ($l | test("^[[:space:]]*BRIDGE_RUN_ID:[[:space:]]+[^[:space:]]"))
+        and (($l
+                | sub("^[[:space:]]*BRIDGE_RUN_ID:[[:space:]]+"; "")
+                | sub("[[:space:]]+$"; "")) == $want)
+    )
+  end;
+def has_status_line($want):
+  ((. // "") | split("\n") | map(sub("\r$"; "")))
+  | any(. as $l |
+      ($l | test("^[[:space:]]*BRIDGE_STATUS:[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*$"))
+      and (
+        ($want == "")
+        or (($l
+              | sub("^[[:space:]]*BRIDGE_STATUS:[[:space:]]+"; "")
+              | sub("[[:space:]]+$"; "")) == $want)
+      )
+  );
+'
+
+# Shared scratch files for _gh_api results. Reused across iterations so we
+# don't churn /tmp. The OUT file holds the response body; ERR holds a
+# one-line classified message used by _die_hard_api.
+_BRIDGE_API_OUT=$(mktemp)
+_BRIDGE_API_ERR=$(mktemp)
+trap 'rm -f "$_BRIDGE_API_OUT" "$_BRIDGE_API_ERR"' EXIT INT TERM
+
+# _gh_api <endpoint> [extra-args...]
+# Writes response body to $_BRIDGE_API_OUT (truncated each call) and a
+# classified one-line diagnostic to $_BRIDGE_API_ERR on failure.
+# Return codes:
+#   0  success (caller should read $_BRIDGE_API_OUT)
+#   2  transient failure — already log_warn'd, caller should keep polling
+#   11 auth  (HTTP 401 / bad credentials)
+#   13 permission or rate limit (HTTP 403)
+#   14 not found (HTTP 404 / repo or PR missing)
+#   15 non-transient (HTTP 410, 422, etc.)
+#   16 unclassified hard failure
+# Codes 11/13/14/15/16 must be turned into exit 1 in the OUTER shell via
+# _die_hard_api — calling die() in here would only kill a subshell when
+# this function is invoked from a $(...) substitution.
+_gh_api() {
+  local endpoint="$1"; shift
+  : > "$_BRIDGE_API_OUT"
+  : > "$_BRIDGE_API_ERR"
+  local err rc
+  err=$(mktemp)
+  gh api "$endpoint" "$@" >"$_BRIDGE_API_OUT" 2>"$err"; rc=$?
+  if [ "$rc" -eq 0 ]; then rm -f "$err"; return 0; fi
+  local msg; msg=$(head -3 "$err" | tr '\n' ' ')
+  rm -f "$err"
+  case "$msg" in
+    *"HTTP 401"*|*"Bad credentials"*|*"authentication"*)
+      printf "%s" "$msg" > "$_BRIDGE_API_ERR"; return 11 ;;
+    *"HTTP 403"*)
+      printf "%s" "$msg" > "$_BRIDGE_API_ERR"; return 13 ;;
+    *"HTTP 404"*|*"Not Found"*|*"Could not resolve"*)
+      printf "%s" "$msg" > "$_BRIDGE_API_ERR"; return 14 ;;
+    *"HTTP 410"*|*"HTTP 422"*)
+      printf "%s" "$msg" > "$_BRIDGE_API_ERR"; return 15 ;;
+    *"HTTP 5"*|*"timeout"*|*"connection"*|*"could not resolve host"*|*"temporarily"*)
+      log_warn "transient GitHub error on $endpoint; retrying: $msg"
+      return 2 ;;
+    *)
+      printf "%s" "$msg" > "$_BRIDGE_API_ERR"; return 16 ;;
+  esac
+}
+
+# _die_hard_api <rc> <endpoint> — must be called in the OUTER shell so die()
+# actually exits the watch process.
+_die_hard_api() {
+  local rc=$1 endpoint=$2
+  local m; m=$(cat "$_BRIDGE_API_ERR" 2>/dev/null)
+  case "$rc" in
+    11) die "GitHub auth failure on $endpoint (run: gh auth login). $m" ;;
+    13) die "GitHub denied $endpoint (HTTP 403 — permission or rate limit). $m" ;;
+    14) die "GitHub returned 404 for $endpoint (PR $pr or repo $repo not found / not visible). $m" ;;
+    15) die "GitHub non-transient error on $endpoint. $m" ;;
+    16) die "gh api $endpoint failed. $m" ;;
+    *)  die "gh api $endpoint failed (rc=$rc). $m" ;;
+  esac
+}
+
+# Helper: run _gh_api in the OUTER shell. On hard failures call die() so the
+# watcher exits 1 instead of swallowing the error inside a $(...) substitution.
+# Sets $api_body to the response body on success/transient ("" on transient).
+api_body=""
+_fetch() {
+  api_body=""
+  local endpoint="$1"; shift
+  local rc=0
+  _gh_api "$endpoint" "$@" || rc=$?
+  case "$rc" in
+    0)  api_body=$(cat "$_BRIDGE_API_OUT") ;;
+    2)  api_body="" ;;                       # transient — log_warn already emitted
+    *)  _die_hard_api "$rc" "$endpoint" ;;   # hard failure — exits the watcher
+  esac
+}
+
+last_inline_match_epoch=0
+
+while :; do
+  now=$(date -u +%s)
+  if [ "$now" -ge "$deadline" ]; then
+    log_err "timeout after ${timeout}s without a matching BRIDGE_STATUS marker"
+    exit 1
+  fi
+
+  # 1. PR body (coarse: filtered by .updated_at).
+  _fetch "repos/$repo/pulls/$pr"
+  if [ -n "$api_body" ]; then
+    pr_updated=$(printf "%s" "$api_body" | jq -r '.updated_at // empty')
+    pr_body=$(printf "%s"   "$api_body" | jq -r '.body // ""')
+    pr_user=$(printf "%s"   "$api_body" | jq -r '.user.login // ""')
+    if [ -n "$pr_updated" ]; then
+      pr_updated_epoch=$(bridge_iso_to_epoch "$pr_updated" 2>/dev/null || echo 0)
+      if [ "$pr_updated_epoch" -ge "$start_epoch" ]; then
+        if [ -z "$author" ] || [ "$pr_user" = "$author" ]; then
+          if _body_matches "$pr_body"; then
+            log_ok "PR body match (author=$pr_user updated=$pr_updated)"
+            exit 0
+          fi
+        fi
+      fi
+    fi
+  fi
+
+  # 2. issue comments
+  _fetch "repos/$repo/issues/$pr/comments" --paginate
+  comments="$api_body"; [ -z "$comments" ] && comments="[]"
+  match=$(printf "%s" "$comments" | jq -r \
+    --arg start "$start_iso" --arg author "$author" --arg rid "$run_id" --arg status "$status" \
+    "$JQ_PRELUDE"'
+    (if type == "array" then . else [] end)
+    | map(select(.created_at >= $start))
+    | map(select($author == "" or .user.login == $author))
+    | map(select((.body // "") | has_runid_line($rid)))
+    | map(select((.body // "") | has_status_line($status)))
+    | (first // empty)
+    | (.user.login // "?") + "@" + (.created_at // "?")
+  ')
+  if [ -n "$match" ]; then
+    log_ok "issue comment match: $match"
+    exit 0
+  fi
+
+  # 3. PR reviews (require non-empty body)
+  _fetch "repos/$repo/pulls/$pr/reviews" --paginate
+  reviews="$api_body"; [ -z "$reviews" ] && reviews="[]"
+  match=$(printf "%s" "$reviews" | jq -r \
+    --arg start "$start_iso" --arg author "$author" --arg rid "$run_id" --arg status "$status" \
+    "$JQ_PRELUDE"'
+    (if type == "array" then . else [] end)
+    | map(select((.submitted_at // "") >= $start))
+    | map(select($author == "" or (.user.login // "") == $author))
+    | map(select((.body // "") != ""))
+    | map(select((.body // "") | has_runid_line($rid)))
+    | map(select((.body // "") | has_status_line($status)))
+    | (first // empty)
+    | (.user.login // "?") + "@" + (.submitted_at // "?")
+  ')
+  if [ -n "$match" ]; then
+    log_ok "review match: $match"
+    exit 0
+  fi
+
+  # 4. inline review comments (apply quiet window for inline-only signals)
+  _fetch "repos/$repo/pulls/$pr/comments" --paginate
+  inline="$api_body"; [ -z "$inline" ] && inline="[]"
+  inline_match_iso=$(printf "%s" "$inline" | jq -r \
+    --arg start "$start_iso" --arg author "$author" --arg rid "$run_id" --arg status "$status" \
+    "$JQ_PRELUDE"'
+    (if type == "array" then . else [] end)
+    | map(select(.created_at >= $start))
+    | map(select($author == "" or .user.login == $author))
+    | map(select((.body // "") | has_runid_line($rid)))
+    | map(select((.body // "") | has_status_line($status)))
+    | sort_by(.created_at)
+    | (last // empty)
+    | (.created_at // empty)
+  ')
+  if [ -n "$inline_match_iso" ]; then
+    e=$(bridge_iso_to_epoch "$inline_match_iso")
+    if [ "$e" -gt "$last_inline_match_epoch" ]; then
+      last_inline_match_epoch=$e
+    fi
+    elapsed=$(( now - last_inline_match_epoch ))
+    if [ "$elapsed" -ge "$quiet" ]; then
+      log_ok "inline comment match; quiet window ${quiet}s elapsed (last=$inline_match_iso)"
+      exit 0
+    fi
+    remaining=$(( quiet - elapsed ))
+    log_info "inline match seen (last=$inline_match_iso); waiting quiet window ${remaining}s"
+  fi
+
+  # 5. commits — inspected for visibility only. Commit messages do NOT
+  # complete the watch; only comments, reviews, and PR body do. Logged so
+  # users can see when an agent dropped a marker only in a commit message.
+  _fetch "repos/$repo/pulls/$pr/commits" --paginate
+  commits="$api_body"; [ -z "$commits" ] && commits="[]"
+  commit_match=$(printf "%s" "$commits" | jq -r \
+    --arg start "$start_iso" --arg author "$author" --arg rid "$run_id" --arg status "$status" \
+    "$JQ_PRELUDE"'
+    (if type == "array" then . else [] end)
+    | map(select(((.commit.committer.date // .commit.author.date) // "") >= $start))
+    | map(select($author == "" or (.author.login // "") == $author))
+    | map(select((.commit.message // "") | has_runid_line($rid)))
+    | map(select((.commit.message // "") | has_status_line($status)))
+    | (first // empty)
+    | ((.sha // "?")[0:7]) + "@" + ((.commit.committer.date // .commit.author.date) // "?")
+  ')
+  if [ -n "$commit_match" ]; then
+    log_info "commit with marker observed: $commit_match (informational; not a completion signal — re-post in a comment or review)"
+  fi
+
+  sleep "$poll"
+done

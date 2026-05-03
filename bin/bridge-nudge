@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# bridge-nudge — paste a prompt into an agent's tmux session via named buffer.
+set -eu
+
+_BRIDGE_BIN_DIR=$(cd "$(dirname "$0")" && pwd)
+if [ -L "$0" ]; then
+  _real=$(readlink "$0")
+  case "$_real" in
+    /*) ;;
+    *) _real="$_BRIDGE_BIN_DIR/$_real" ;;
+  esac
+  _BRIDGE_BIN_DIR=$(cd "$(dirname "$_real")" && pwd)
+fi
+_BRIDGE_LIB_DIR="$_BRIDGE_BIN_DIR/../lib"
+# shellcheck source=lib/bridge-common.sh disable=SC1091
+. "$_BRIDGE_LIB_DIR/bridge-common.sh"
+
+usage() {
+  cat <<EOF
+usage: bridge-nudge <agent> [prompt]
+       echo "..." | bridge-nudge <agent>
+       bridge-nudge <agent> --template templates/reviewer-prompt.md [opts]
+
+Sends a prompt to an agent's tmux session using a *named* tmux paste buffer,
+then presses Enter. Multiline prompts are preserved.
+
+If the rendered prompt does not already contain "BRIDGE_RUN_ID", a compact
+handoff header is prepended automatically. Use --no-header to disable.
+
+Options:
+  --repo OWNER/REPO         repo override (also used in header)
+  --pr NUMBER               PR number (header / template)
+  --role ROLE               handoff role
+  --source-agent AGENT      source agent for handoff
+  --run-id ID               bridge run ID; auto-generated if absent
+  --template FILE           render template (replaces known {{PLACEHOLDERS}})
+  --task TEXT               task description for header / template
+  --expected-output TEXT    expected output for header / template
+  --status-marker TEXT      required reply marker for header / template
+  --header                  force-prepend the handoff header
+  --no-header               never prepend the handoff header
+  --strict-template         fail if template still has unfilled {{PLACEHOLDERS}}
+  --session NAME            override tmux session name
+  -h, --help                show this help
+
+Known template placeholders:
+  {{BRIDGE_RUN_ID}} {{REPO}} {{PR}} {{SOURCE_AGENT}} {{TARGET_AGENT}}
+  {{TARGET_LOGIN}} {{ROLE}} {{REVIEW_MODE}} {{TASK}} {{EXPECTED_OUTPUT}}
+  {{STATUS_MARKER}}
+EOF
+}
+
+agent=""
+prompt=""
+template=""
+repo=""
+pr=""
+role=""
+source_agent=""
+run_id=""
+task=""
+expected=""
+status_marker=""
+header_mode="auto"
+strict=0
+session_override=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)         usage; exit 0 ;;
+    --repo)            repo="${2:?--repo requires value}"; shift 2 ;;
+    --pr)              pr="${2:?--pr requires value}"; shift 2 ;;
+    --role)            role="${2:?--role requires value}"; shift 2 ;;
+    --source-agent)    source_agent="${2:?--source-agent requires value}"; shift 2 ;;
+    --run-id)          run_id="${2:?--run-id requires value}"; shift 2 ;;
+    --template)        template="${2:?--template requires value}"; shift 2 ;;
+    --task)            task="${2:?--task requires value}"; shift 2 ;;
+    --expected-output) expected="${2:?--expected-output requires value}"; shift 2 ;;
+    --status-marker)   status_marker="${2:?--status-marker requires value}"; shift 2 ;;
+    --session)         session_override="${2:?--session requires value}"; shift 2 ;;
+    --header)          header_mode="force"; shift ;;
+    --no-header)       header_mode="off"; shift ;;
+    --strict-template) strict=1; shift ;;
+    --) shift; break ;;
+    -*) die "unknown flag: $1 (try --help)" ;;
+    *)
+      if [ -z "$agent" ]; then
+        agent="$1"
+      elif [ -z "$prompt" ]; then
+        prompt="$1"
+      else
+        # Allow extra positional words to extend the prompt.
+        prompt="$prompt $1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+[ -n "$agent" ] || { usage >&2; exit 2; }
+
+bridge_load
+require_cmd tmux
+
+agent_exists "$agent" || die "unknown agent: $agent (configured: $BRIDGE_AGENTS)"
+session="$session_override"
+[ -z "$session" ] && session=$(agent_get "$agent" SESSION)
+[ -n "$session" ] || die "agent $agent missing 'session'"
+
+target_login=$(agent_get "$agent" GITHUB_LOGIN)
+target_role=$(agent_get "$agent" ROLE)
+review_mode=$(agent_get "$agent" REVIEW_MODE)
+
+# Resolve prompt source.
+if [ -n "$template" ]; then
+  [ -f "$template" ] || die "template not found: $template"
+  prompt=$(cat "$template")
+elif [ -z "$prompt" ]; then
+  if [ -t 0 ]; then
+    die "no prompt provided (argv, stdin, or --template required)"
+  fi
+  prompt=$(cat)
+fi
+
+# Apply defaults for header / template fields.
+[ -z "$run_id" ] && run_id=$(bridge_generate_run_id)
+[ -z "$repo" ]   && repo="${BRIDGE_GITHUB_REPO:-}"
+[ -z "$role" ]   && role="$target_role"
+[ -z "$review_mode" ] && review_mode="adversarial"
+
+# Render known placeholders. Use awk for safe literal substitution.
+_render() {
+  # _render KEY VALUE BODY -> stdout
+  awk -v key="{{$1}}" -v val="$2" '
+    BEGIN { klen = length(key) }
+    {
+      out=""; line=$0
+      while ((i = index(line, key)) > 0) {
+        out = out substr(line, 1, i-1) val
+        line = substr(line, i + klen)
+      }
+      print out line
+    }
+  ' <<EOF
+$3
+EOF
+}
+
+prompt=$(_render BRIDGE_RUN_ID    "$run_id"        "$prompt")
+prompt=$(_render REPO             "$repo"          "$prompt")
+prompt=$(_render PR               "$pr"            "$prompt")
+prompt=$(_render SOURCE_AGENT     "$source_agent"  "$prompt")
+prompt=$(_render TARGET_AGENT     "$agent"         "$prompt")
+prompt=$(_render TARGET_LOGIN     "$target_login"  "$prompt")
+prompt=$(_render ROLE             "$role"          "$prompt")
+prompt=$(_render REVIEW_MODE      "$review_mode"   "$prompt")
+prompt=$(_render TASK             "$task"          "$prompt")
+prompt=$(_render EXPECTED_OUTPUT  "$expected"      "$prompt")
+prompt=$(_render STATUS_MARKER    "$status_marker" "$prompt")
+
+if [ "$strict" -eq 1 ]; then
+  case "$prompt" in
+    *'{{'*'}}'*) die "template has unfilled placeholder(s); use --strict-template off or fill them" ;;
+  esac
+fi
+
+# Header decision. Detect a real marker line of the form:
+#   BRIDGE_RUN_ID: <non-empty value>
+# at the start of some line. A bare mention of the string "BRIDGE_RUN_ID"
+# in prose ("…include BRIDGE_RUN_ID…") must NOT suppress the auto header,
+# because that would leave the agent without a real run id to echo back.
+if printf "%s\n" "$prompt" | grep -E -q '^BRIDGE_RUN_ID:[[:space:]]+[^[:space:]]'; then
+  has_run_id=1
+else
+  has_run_id=0
+fi
+
+case "$header_mode" in
+  force) include_header=1 ;;
+  off)   include_header=0 ;;
+  auto)  if [ "$has_run_id" -eq 1 ]; then include_header=0; else include_header=1; fi ;;
+esac
+
+if [ "$include_header" -eq 1 ]; then
+  header="BRIDGE_RUN_ID: $run_id"$'\n'
+  [ -n "$source_agent" ]   && header="${header}SOURCE_AGENT: $source_agent"$'\n'
+  header="${header}TARGET_AGENT: $agent"$'\n'
+  [ -n "$role" ]           && header="${header}ROLE: $role"$'\n'
+  [ -n "$repo" ]           && header="${header}REPO: $repo"$'\n'
+  [ -n "$pr" ]             && header="${header}PR: $pr"$'\n'
+  [ -n "$task" ]           && header="${header}TASK: $task"$'\n'
+  [ -n "$expected" ]       && header="${header}EXPECTED_OUTPUT: $expected"$'\n'
+  [ -n "$status_marker" ]  && header="${header}STATUS_MARKER: $status_marker"$'\n'
+  prompt="${header}"$'\n'"$prompt"
+fi
+
+tmux has-session -t "$session" 2>/dev/null \
+  || die "tmux session not found: $session (try: bridge-start $agent)"
+
+# Named tmux buffer to avoid collisions with other concurrent nudges.
+buffer="bridge-${agent}-$$-$(date +%s)"
+tmux set-buffer -b "$buffer" -- "$prompt"
+tmux paste-buffer -b "$buffer" -p -t "$session"
+sleep 0.4
+tmux send-keys -t "$session" Enter
+tmux delete-buffer -b "$buffer" 2>/dev/null || true
+
+bytes=${#prompt}
+if [ "$include_header" -eq 1 ]; then header_state=on; else header_state=off; fi
+log_ok "nudged $agent (session=$session run=$run_id bytes=$bytes header=$header_state)"

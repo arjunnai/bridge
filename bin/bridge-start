@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# bridge-start — idempotently start tmux sessions for configured agents.
+set -eu
+
+_BRIDGE_BIN_DIR=$(cd "$(dirname "$0")" && pwd)
+if [ -L "$0" ]; then
+  _real=$(readlink "$0")
+  case "$_real" in
+    /*) ;;
+    *) _real="$_BRIDGE_BIN_DIR/$_real" ;;
+  esac
+  _BRIDGE_BIN_DIR=$(cd "$(dirname "$_real")" && pwd)
+fi
+_BRIDGE_LIB_DIR="$_BRIDGE_BIN_DIR/../lib"
+# shellcheck source=lib/bridge-common.sh disable=SC1091
+. "$_BRIDGE_LIB_DIR/bridge-common.sh"
+
+usage() {
+  cat <<EOF
+usage: bridge-start [agent ...]
+
+Starts tmux sessions for the named agents (or all configured/built-in agents
+when no names are given). Idempotent: existing sessions are left running.
+
+Built-in agents: codex, claude, kiro.
+Override profiles in ./config.toml or via \$BRIDGE_CONFIG.
+
+Options:
+  -h, --help    show this help
+EOF
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
+
+bridge_load
+require_cmd tmux
+
+if [ $# -gt 0 ]; then
+  targets="$*"
+else
+  targets="$BRIDGE_AGENTS"
+fi
+
+[ -n "$targets" ] || die "no agents to start"
+
+started=0
+already=0
+missing=0
+
+for a in $targets; do
+  agent_exists "$a" || die "unknown agent: $a (configured: $BRIDGE_AGENTS)"
+  session=$(agent_get "$a" SESSION)
+  command=$(agent_get "$a" COMMAND)
+  [ -n "$session" ] || die "agent $a missing 'session'"
+  [ -n "$command" ] || die "agent $a missing 'command'"
+
+  if tmux has-session -t "$session" 2>/dev/null; then
+    log_info "$a: session '$session' already running (skip)"
+    already=$((already + 1))
+    continue
+  fi
+
+  head=${command%% *}
+  if ! command -v "$head" >/dev/null 2>&1; then
+    log_warn "$a: '$head' not in PATH — starting anyway, tmux will surface the error"
+    missing=$((missing + 1))
+  fi
+
+  # Preserve full command string (with arguments) by passing as a single arg.
+  tmux new-session -d -s "$session" "$command"
+  log_ok "$a: started tmux session '$session' -> $command"
+  started=$((started + 1))
+done
+
+log_info "summary: started=$started already=$already command_missing=$missing"
