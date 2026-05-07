@@ -18,6 +18,7 @@
 <p align="center">
   <a href="#why">Why</a> -
   <a href="#install">Install</a> -
+  <a href="#skills">Skills</a> -
   <a href="#quickstart">Quickstart</a> -
   <a href="#workflow">Workflow</a> -
   <a href="#commands">Commands</a> -
@@ -117,9 +118,44 @@ Install options:
 The installer never edits shell rc files. If the target directory is not on
 `PATH`, it prints a note.
 
-Once installed, Claude Code users can run `/bridge` to drive a full phase
-by natural language — the skill handles doctor, start, and phase dispatch
-automatically.
+## Skills
+
+Skills let you drive bridge with natural language instead of memorising subcommands. The installer drops them into every detected agent profile automatically.
+
+| Skill | Agent | Trigger | What it does |
+| --- | --- | --- | --- |
+| `bridge` | Claude Code | `/bridge <task>` | Runs doctor, starts sessions, dispatches the right `bridge phase` command, watches PR state. |
+| `bridge-phase` | Codex | `$bridge-phase <task>` | Same as above — identical workflow, Codex syntax. |
+
+### `/bridge` (Claude Code)
+
+```
+/bridge add dark mode to the settings page
+/bridge resume PR 42
+/bridge watch PR 42
+```
+
+The skill picks the right subcommand automatically:
+
+| You say | What runs |
+| --- | --- |
+| A task description | `bridge phase run --task "<your task>"` |
+| A PR number + optional task | `bridge phase resume --pr <n> [--task "..."]` |
+| "watch" or "check" + PR number | `bridge phase watch --state complete --pr <n>` |
+
+It will never invent a PR number, never merge without you asking, never paste raw `BRIDGE_RUN_ID` recipes.
+
+### `$bridge-phase` (Codex)
+
+Same three branches as above. Invoke with `$bridge-phase` inside any Codex session in the project repo.
+
+### Manual install into a non-standard profile
+
+```bash
+scripts/install.sh --claude-home ~/.claude-work   # extra Claude Code profile
+scripts/install.sh --codex-home ~/.codex-work     # extra Codex profile
+scripts/install.sh --no-skills                    # skip skills entirely
+```
 
 ## Quickstart
 
