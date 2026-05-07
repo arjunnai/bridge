@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/bridge-logo.png" alt="codex-bridge" width="480">
+  <img src="assets/bridge-logo.png" alt="bridge" width="480">
 </p>
 
 <h1 align="center">Local agents. Durable PR state.</h1>
@@ -28,7 +28,7 @@
 
 ---
 
-`codex-bridge` is a lightweight, GitHub-installable bridge for local AI
+`bridge` is a lightweight, GitHub-installable bridge for local AI
 coding agents. It keeps agent sessions alive in `tmux`, wakes them with
 `bridge-nudge`, and treats GitHub PR state as the durable source of truth.
 
@@ -44,7 +44,7 @@ BRIDGE_STATUS: approved
 ## Why
 
 Single-agent loops are easy to start and hard to trust. The same model can
-plan, implement, review, and approve its own work. `codex-bridge` makes the
+plan, implement, review, and approve its own work. `bridge` makes the
 handoff explicit and auditable.
 
 <table>
