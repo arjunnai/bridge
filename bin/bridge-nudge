@@ -130,9 +130,10 @@ fi
 [ -z "$review_mode" ] && review_mode="adversarial"
 
 # Render known placeholders. Use awk for safe literal substitution.
+# printf pipe prevents the shell from interpreting $(...) or backticks in $3.
 _render() {
   # _render KEY VALUE BODY -> stdout
-  awk -v key="{{$1}}" -v val="$2" '
+  printf '%s\n' "$3" | awk -v key="{{$1}}" -v val="$2" '
     BEGIN { klen = length(key) }
     {
       out=""; line=$0
@@ -142,9 +143,7 @@ _render() {
       }
       print out line
     }
-  ' <<EOF
-$3
-EOF
+  '
 }
 
 prompt=$(_render BRIDGE_RUN_ID    "$run_id"                          "$prompt")
@@ -215,15 +214,22 @@ bytes=${#prompt}
 if [ "$include_header" -eq 1 ]; then header_state=on; else header_state=off; fi
 
 if [ "$input_mode" = "stdin" ]; then
-  # One-shot agents: write rendered prompt to a temp file and paste the
-  # invocation command into the shell session. The shell runs the agent
+  # Command-per-nudge agents: write rendered prompt to a temp file and paste
+  # the invocation command into the shell session. The shell runs the agent
   # command with the prompt on stdin, then removes the temp file.
-  _prompt_file=$(mktemp /tmp/bridge-prompt-XXXXXX)
+  # Use a 700-mode directory so the prompt file is not world-readable.
+  _prompt_dir=$(mktemp -d "${TMPDIR:-/tmp}/bridge-prompt-XXXXXX")
+  chmod 700 "$_prompt_dir"
+  _prompt_file="$_prompt_dir/prompt"
   printf "%s" "$prompt" > "$_prompt_file"
-  _invoke="${agent_command} < ${_prompt_file}; rm -f ${_prompt_file}"
+  chmod 600 "$_prompt_file"
+  # Remove the dir if we exit before paste completes (SIGINT, crash, etc).
+  trap 'rm -rf "$_prompt_dir"' EXIT
+  _invoke="${agent_command} < \"${_prompt_file}\"; rm -rf \"${_prompt_dir}\""
   buffer="bridge-${agent}-$$-$(date +%s)"
   tmux set-buffer -b "$buffer" -- "$_invoke"
   tmux paste-buffer -b "$buffer" -p -t "$session"
+  trap - EXIT           # agent's shell rm will clean up after reading
   sleep 0.4
   tmux send-keys -t "$session" Enter
   tmux delete-buffer -b "$buffer" 2>/dev/null || true

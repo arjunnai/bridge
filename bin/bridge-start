@@ -79,9 +79,9 @@ for a in $targets; do
   fi
 
   if [ "$input_mode" = "stdin" ]; then
-    # One-shot agents (e.g. kiro --no-interactive) exit immediately when started
-    # with no prompt. Start a persistent shell instead; bridge-nudge will invoke
-    # the agent command with the rendered prompt piped to stdin.
+    # Stdin-mode agents are command-per-nudge integrations. Start a persistent
+    # shell; bridge-nudge invokes the configured command with the rendered
+    # prompt piped to stdin.
     tmux new-session -d -s "$session" "${SHELL:-/bin/bash}"
   else
     # Preserve full command string (with arguments) by passing as a single arg.

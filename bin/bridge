@@ -20,11 +20,14 @@ Commands:
   start    Start tmux sessions for one or all configured agents.
   nudge    Send a prompt to an agent session.
   watch    Wait for explicit BRIDGE_STATUS markers on a PR.
+  phase    Drive or resume phase plan/implement/review loops.
   doctor   Diagnose local tools, config, repo, and sessions.
 
 Examples:
   bridge doctor
   bridge start
+  bridge phase plan "Plan phase 0"
+  bridge phase resume --pr 42
   bridge nudge claude "Implement X"
   bridge watch 42 --status approved
 
@@ -39,7 +42,7 @@ case "$cmd" in
     usage
     exit 0
     ;;
-  start|nudge|watch|doctor)
+  start|nudge|watch|phase|doctor)
     shift
     exec "$_BRIDGE_BIN_DIR/bridge-$cmd" "$@"
     ;;

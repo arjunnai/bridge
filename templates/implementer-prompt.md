@@ -31,7 +31,9 @@ Then:
   - run the relevant tests or checks listed in the plan
   - commit with a clear message
   - push the branch
-  - open a new PR or update the existing one
+  - open a new normal PR or update the existing one
+  - do not open a draft PR; bridge expects Codex approval markers to be
+    mergeable when no adversarial findings remain
 
 In the PR body or a PR comment, include:
 

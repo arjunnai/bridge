@@ -106,13 +106,20 @@ Install options:
 
 | Command | Effect |
 | --- | --- |
-| `scripts/install.sh` | Symlink commands into `$HOME/.local/bin`. |
+| `scripts/install.sh` | Symlink commands into `$HOME/.local/bin`. Also installs skills into all detected `~/.codex*` and `~/.claude*` profiles. |
 | `scripts/install.sh --copy --force` | Copy commands and overwrite existing files. |
 | `INSTALL_DIR=/usr/local/bin scripts/install.sh` | Install commands into a specific directory. |
 | `PREFIX=/opt/bridge scripts/install.sh` | Install commands into `/opt/bridge/bin`. |
+| `scripts/install.sh --no-skills` | Skip skill installation. |
+| `scripts/install.sh --claude-home ~/.claude-work` | Also install Claude Code skills into a non-standard profile dir. |
+| `scripts/install.sh --codex-home ~/.codex-work` | Also install Codex skills into a non-standard profile dir. |
 
 The installer never edits shell rc files. If the target directory is not on
 `PATH`, it prints a note.
+
+Once installed, Claude Code users can run `/bridge` to drive a full phase
+by natural language — the skill handles doctor, start, and phase dispatch
+automatically.
 
 ## Quickstart
 
@@ -264,7 +271,9 @@ Invalid `[orchestration]` config is a hard failure. Exits non-zero on hard failu
 ## Phase Orchestration (v1)
 
 v1 adds a first-class orchestrator/planner phase before implementation.
-No daemon. No hosted service. No automatic merge.
+No daemon. No hosted service. No automatic merge in low-level primitives.
+`bridge phase run` may merge after explicit Codex bridge approval. `bridge
+phase resume` never merges unless `--merge` is passed.
 
 ### How it works
 
@@ -296,13 +305,13 @@ prompt_template = "templates/orchestrator-prompt.md"
 
 [agents.kiro]
 session         = "kiro"
-command         = "kiro-cli chat --no-interactive --trust-all-tools --model claude-opus-4.6"
+command         = "kiro-cli chat --trust-all-tools --model claude-opus-4.6"
 role            = "implementer"
 prompt_template = "templates/implementer-prompt.md"
 
 [agents.codex]
 session         = "codex"
-command         = "codex"
+command         = "codex --yolo"
 role            = "reviewer"
 review_mode     = "adversarial"
 prompt_template = "templates/reviewer-prompt.md"
@@ -311,6 +320,55 @@ prompt_template = "templates/reviewer-prompt.md"
 Invalid orchestration config is a hard failure in `bridge-doctor`.
 
 ### Example A: Claude orchestrates, Kiro implements, Codex reviews
+
+Short form:
+
+```bash
+bridge start
+bridge phase run --task "Phase 0: inspect live DB prerequisites"
+```
+
+`bridge phase run` opens or uses a normal PR, not a draft PR. When Codex posts
+`BRIDGE_STATUS: approved` plus `BRIDGE_PHASE_STATUS: completed`, the driver
+merges the PR by default. Use `--no-merge` to stop after approval, or
+`--merge-method merge|squash|rebase` to choose the merge strategy.
+
+Resume an existing bridge PR:
+
+```bash
+bridge phase resume --pr 42
+```
+
+`bridge phase resume` is the agent-driver UX for picking up work already on a
+PR. It reads PR body, issue comments, reviews, and inline comments, discovers
+the run ID when exactly one `BRIDGE_RUN_ID:` marker exists, infers the next
+step, nudges the right tmux agent, and watches until phase completion. It does
+not merge by default; pass `--merge` to merge only after Codex posts both
+`BRIDGE_STATUS: approved` and `BRIDGE_PHASE_STATUS: completed`.
+
+Adopt a markerless PR by giving the task explicitly:
+
+```bash
+bridge phase resume --pr 42 --task "Review the existing implementation for phase 1"
+```
+
+Adoption posts a durable PR comment with a new `BRIDGE_RUN_ID:` and treats the
+current PR head as `implementation_ready`, so Codex reviews the current code
+first. Use `--dry-run` to print the detected state and next action without
+posting comments, nudging agents, or merging.
+
+Manual form, when an operator wants to step through each transition:
+
+```bash
+bridge phase plan --task "Phase 0: inspect live DB prerequisites"
+bridge phase watch --state plan --pr 42 --run-id bridge-...
+bridge phase implement --pr 42 --run-id bridge-...
+bridge phase watch --state implementation --pr 42 --run-id bridge-...
+bridge phase review --pr 42 --run-id bridge-...
+bridge phase watch --state complete --pr 42 --run-id bridge-...
+```
+
+Expanded form:
 
 ```bash
 bridge-start
@@ -340,6 +398,26 @@ bin/bridge-nudge codex \
 
 bin/bridge-watch 42 --status approved --phase-status completed --run-id "$BRIDGE_RUN_ID"
 ```
+
+Codex operators should prefer the `bridge phase ...` short form or the bundled
+`bridge-phase` Codex skill. Humans should not need to assemble
+`BRIDGE_RUN_ID` export pipelines or manually nudge each role by hand.
+
+### Claude Profile Aliases
+
+If a Claude profile is a shell alias, launch it through that shell in
+`config.toml`:
+
+```toml
+[agents.claude]
+session = "claude"
+command = "fish -lc 'claude-eparts --dangerously-skip-permissions'"
+role = "orchestrator"
+```
+
+Known UX gap: Claude may still show a one-time workspace trust or bypass-mode
+acceptance screen before the pane is usable. Bridge does not yet detect and
+clear that prompt automatically.
 
 ### Example B: Codex orchestrates, Claude implements, Codex reviews
 
@@ -400,7 +478,7 @@ poll_secs    = 10
 
 [agents.codex]
 session         = "codex"
-command         = "codex"
+command         = "codex --yolo"
 role            = "reviewer"
 review_mode     = "adversarial"
 prompt_template = "templates/reviewer-prompt.md"
@@ -511,12 +589,13 @@ bridge-watch 42 --agent codex \
 - Human approval prompts remain visible in tmux.
 - Reviewers do not need push access.
 - Implementers need only the repo permissions required to push their branch.
-- Auto-merge is intentionally out of scope for the MVP.
+- Auto-merge is opt-in for resume and remains gated on explicit Codex approval
+  plus `BRIDGE_PHASE_STATUS: completed`.
 
 ## Project layout
 
 ```text
-bin/             bridge-start, bridge-nudge, bridge-watch, bridge-doctor
+bin/             bridge-start, bridge-nudge, bridge-watch, bridge-phase, bridge-doctor
 lib/             shared Bash helpers
 templates/       handoff, implementer, and reviewer prompts
 scripts/         installer

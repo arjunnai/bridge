@@ -15,6 +15,7 @@ BRIDGE_VERSION="0.1.0"
 BRIDGE_ORCHESTRATOR=""
 BRIDGE_IMPLEMENTER=""
 BRIDGE_REVIEWER=""
+BRIDGE_VALIDATOR=""
 BRIDGE_PHASE_PLAN_FILE=""
 BRIDGE_ORCHESTRATION_PRESENT=0
 
@@ -61,7 +62,7 @@ _bridge_agent_var() {
 agent_set() {
   # agent_set <agent> <KEY> <value>
   local var; var=$(_bridge_agent_var "$1" "$2")
-  eval "$var=\${3-}"
+  printf -v "$var" '%s' "${3-}"
   case " $BRIDGE_AGENTS " in
     *" $1 "*) ;;
     *) BRIDGE_AGENTS="${BRIDGE_AGENTS:+$BRIDGE_AGENTS }$1" ;;
@@ -71,7 +72,7 @@ agent_set() {
 agent_get() {
   # agent_get <agent> <KEY> -> stdout
   local var; var=$(_bridge_agent_var "$1" "$2")
-  eval "printf '%s' \"\${$var-}\""
+  printf '%s' "${!var-}"
 }
 
 agent_exists() {
@@ -167,6 +168,7 @@ bridge_parse_toml() {
           orchestrator)    BRIDGE_ORCHESTRATOR="$val" ;;
           implementer)     BRIDGE_IMPLEMENTER="$val" ;;
           reviewer)        BRIDGE_REVIEWER="$val" ;;
+          validator)       BRIDGE_VALIDATOR="$val" ;;
           phase_plan_file) BRIDGE_PHASE_PLAN_FILE="$val" ;;
         esac
         ;;
@@ -197,14 +199,10 @@ bridge_apply_defaults() {
       [ -z "$(agent_get "$a" SESSION)" ] && agent_set "$a" SESSION "$a"
       if [ -z "$(agent_get "$a" COMMAND)" ]; then
         if [ "$a" = "kiro" ]; then
-          agent_set "$a" COMMAND "kiro-cli chat --no-interactive --trust-all-tools --model claude-opus-4.6"
+          agent_set "$a" COMMAND "kiro-cli chat --trust-all-tools --model claude-opus-4.6"
         else
           agent_set "$a" COMMAND "$a"
         fi
-      fi
-      # kiro default: stdin mode (one-shot command, bridge-start opens a shell)
-      if [ "$a" = "kiro" ] && [ -z "$(agent_get "$a" INPUT_MODE)" ]; then
-        agent_set "$a" INPUT_MODE "stdin"
       fi
     done
   fi
@@ -396,6 +394,17 @@ bridge_orchestration_validate() {
       esac
     fi
   done
+
+  if [ -n "$BRIDGE_VALIDATOR" ]; then
+    if ! agent_exists "$BRIDGE_VALIDATOR"; then
+      printf "orchestration references validator '%s' not defined in [agents.*]\n" "$BRIDGE_VALIDATOR"
+      _errs=$((_errs + 1))
+    fi
+    if [ "$BRIDGE_VALIDATOR" = "$BRIDGE_IMPLEMENTER" ]; then
+      printf "orchestration.validator must not be the same agent as implementer (%s)\n" "$BRIDGE_IMPLEMENTER"
+      _errs=$((_errs + 1))
+    fi
+  fi
 
   [ "$_errs" -gt 0 ] && return 1 || return 0
 }

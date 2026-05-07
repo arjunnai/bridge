@@ -75,7 +75,7 @@ fi
 if bridge_orchestration_present; then
   _orch_errors=$(bridge_orchestration_validate)
   if [ -z "$_orch_errors" ]; then
-    ok "orchestration: orchestrator=${BRIDGE_ORCHESTRATOR} implementer=${BRIDGE_IMPLEMENTER} reviewer=${BRIDGE_REVIEWER} phase_plan_file=$(bridge_phase_plan_file)"
+    ok "orchestration: orchestrator=${BRIDGE_ORCHESTRATOR} implementer=${BRIDGE_IMPLEMENTER} reviewer=${BRIDGE_REVIEWER} validator=${BRIDGE_VALIDATOR:-<none>} phase_plan_file=$(bridge_phase_plan_file)"
   else
     _IFS="$IFS"; IFS='
 '

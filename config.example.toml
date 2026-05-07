@@ -29,7 +29,7 @@ phase_plan_file = "BRIDGE_PHASE_PLAN.md"
 
 [agents.codex]
 session         = "codex"
-command         = "codex"
+command         = "codex --yolo"
 role            = "reviewer"
 review_mode     = "adversarial"
 prompt_template = "templates/reviewer-prompt.md"
@@ -44,8 +44,7 @@ github_login    = ""
 
 [agents.kiro]
 session         = "kiro"
-command         = "kiro-cli chat --no-interactive --trust-all-tools --model claude-opus-4.6"
-input_mode      = "stdin"
+command         = "kiro-cli chat --trust-all-tools --model claude-opus-4.6"
 role            = "implementer"
 prompt_template = "templates/implementer-prompt.md"
 github_login    = ""

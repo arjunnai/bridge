@@ -3,3 +3,5 @@ PRD.md
 ARCHITECTURE.md
 v1.md
 docs/handoff/
+config.toml
+*.local.toml

@@ -119,6 +119,8 @@ fi
 
 # Validate --status and --phase-status as strict identifiers so values never
 # leak into regex with metacharacters and prefix-matching is impossible.
+# Known status values: approved, changes_requested, plan_ready,
+#   implementation_ready, fixes_pushed, validated, validation_failed
 if [ -n "$status" ]; then
   if ! printf "%s" "$status" | LC_ALL=C grep -E -q '^[A-Za-z_][A-Za-z0-9_]*$'; then
     die "--status must match [A-Za-z_][A-Za-z0-9_]* (got: $status)"

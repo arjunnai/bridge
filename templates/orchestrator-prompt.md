@@ -80,7 +80,12 @@ Implementation must not begin until this plan file is committed and readable.
 </plan_file_contract>
 
 <github_output_contract>
-After writing the plan file, post a GitHub comment on PR #{{PR}} containing:
+After writing the plan file, open or update a normal GitHub PR, not a draft PR.
+If the repository is empty and has no default branch, create the smallest safe
+baseline branch first so GitHub has a base branch, then open a normal PR for
+the phase branch.
+
+After the normal PR exists, post a GitHub comment on PR #{{PR}} containing:
 
 BRIDGE_RUN_ID: {{BRIDGE_RUN_ID}}
 BRIDGE_STATUS: plan_ready
