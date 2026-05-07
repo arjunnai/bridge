@@ -341,7 +341,7 @@ prompt_template = "templates/orchestrator-prompt.md"
 
 [agents.kiro]
 session         = "kiro"
-command         = "kiro-cli chat --trust-all-tools --model claude-opus-4.6"
+command         = "kiro-cli chat --trust-all-tools --model claude-opus-4.7"
 role            = "implementer"
 prompt_template = "templates/implementer-prompt.md"
 

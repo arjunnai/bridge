@@ -199,7 +199,7 @@ bridge_apply_defaults() {
       [ -z "$(agent_get "$a" SESSION)" ] && agent_set "$a" SESSION "$a"
       if [ -z "$(agent_get "$a" COMMAND)" ]; then
         if [ "$a" = "kiro" ]; then
-          agent_set "$a" COMMAND "kiro-cli chat --trust-all-tools --model claude-opus-4.6"
+          agent_set "$a" COMMAND "kiro-cli chat --trust-all-tools --model claude-opus-4.7"
         else
           agent_set "$a" COMMAND "$a"
         fi
