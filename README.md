@@ -320,6 +320,7 @@ orchestrator -> BRIDGE_PHASE_PLAN.md -> implementer -> PR -> Codex review -> fix
 - **Orchestrator** (Claude or Codex) reads the task, writes a durable `BRIDGE_PHASE_PLAN.md`, and posts `BRIDGE_STATUS: plan_ready`.
 - **Implementer** (Claude or Kiro) reads the plan and implements. Posts `BRIDGE_STATUS: implementation_ready`.
 - **Reviewer** (Codex, always adversarial) reads the plan and the PR. Posts either `BRIDGE_STATUS: changes_requested` or `BRIDGE_STATUS: approved` + `BRIDGE_PHASE_STATUS: completed`.
+- **Context maintainer** (optional, any agent) fires once after completion, before merge. Commits docs-only changes to `CLAUDE.md`/`AGENTS.md` on the PR branch and posts `BRIDGE_STATUS: context_updated` or `BRIDGE_STATUS: context_noop`. Never blocks merge.
 - A phase ends only after Codex posts **both** markers.
 
 **Kiro never plans.** Kiro is implementer/validator only.
@@ -328,10 +329,11 @@ orchestrator -> BRIDGE_PHASE_PLAN.md -> implementer -> PR -> Codex review -> fix
 
 ```toml
 [orchestration]
-orchestrator    = "claude"
-implementer     = "kiro"
-reviewer        = "codex"
-phase_plan_file = "BRIDGE_PHASE_PLAN.md"
+orchestrator       = "claude"
+implementer        = "kiro"
+reviewer           = "codex"
+phase_plan_file    = "BRIDGE_PHASE_PLAN.md"
+# context_maintainer = "context"  # optional
 
 [agents.claude]
 session         = "claude"
