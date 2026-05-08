@@ -26,7 +26,13 @@ orchestrator       = "claude"
 implementer        = "kiro"
 reviewer           = "codex"
 phase_plan_file    = "BRIDGE_PHASE_PLAN.md"
-# context_maintainer = "context"  # optional sidecar; fires post-completed, pre-merge
+# context_maintainer = "context"  # optional sidecar; fires post-plan_approved,
+                                   # pre-implementation. Soft-gated and
+                                   # non-fatal: timeout or failure logs a
+                                   # warning and the run continues.
+                                   # May commit docs-only changes
+                                   # (CLAUDE.md / AGENTS.md) on the PR branch
+                                   # without invalidating plan_approved.
 
 [agents.codex]
 session         = "codex"

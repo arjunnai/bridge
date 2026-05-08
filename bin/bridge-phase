@@ -17,16 +17,18 @@ _BRIDGE_LIB_DIR="$_BRIDGE_BIN_DIR/../lib"
 
 usage() {
   cat <<EOF
-usage: bridge phase <run|resume|plan|implement|review|context|watch> [options] [task]
+usage: bridge phase <run|resume|plan|plan-review|plan-fix|implement|review|context|watch> [options] [task]
 
 Commands:
-  run         Drive plan -> implement -> review -> fixes until phase complete.
-  resume      Adopt or continue an existing PR from its latest bridge marker.
-  plan        Nudge the configured orchestrator to write the phase plan.
-  implement   Nudge the configured implementer to execute the phase plan.
-  review      Nudge the configured reviewer for adversarial review.
-  context     Nudge the configured context_maintainer to update durable docs.
-  watch       Wait for a phase marker: plan, implementation, or complete.
+  run          Drive plan -> plan-review -> context -> implement -> review -> fixes.
+  resume       Adopt or continue an existing PR from its latest bridge marker.
+  plan         Nudge the configured orchestrator to write the phase plan.
+  plan-review  Nudge the configured reviewer to adversarially review the plan.
+  plan-fix     Nudge the configured orchestrator to revise the plan after review.
+  implement    Nudge the configured implementer to execute the phase plan.
+  review       Nudge the configured reviewer for adversarial review.
+  context      Nudge the configured context_maintainer to update durable docs.
+  watch        Wait for a phase marker: plan, implementation, or complete.
 
 Common options:
   --repo OWNER/REPO     repo override
@@ -37,7 +39,9 @@ Common options:
   --reviewer AGENT      resume: override reviewer agent
   --source-agent AGENT  source agent label (default: codex)
   --task TEXT           task text (can also be positional)
-  --max-cycles N        review/fix cycles for run (default: 5)
+  --max-cycles N        implementation review/fix cycles for run (default: 5)
+  --max-plan-cycles N   plan-review cycles before bailing (default: 20)
+  --review-plan         resume: run the plan-review gate before implementation
   --dry-run             print detected resume state and next action only
   --merge               resume: merge after approved + completed (opt-in)
   --no-merge            do not merge after approved + completed
@@ -51,8 +55,11 @@ Watch options:
 Examples:
   bridge phase run --task "Phase 0: inspect live DB prerequisites"
   bridge phase resume --pr 12
+  bridge phase resume --pr 12 --review-plan
   bridge phase resume --pr 12 --task "Adopt this PR into bridge review"
   bridge phase plan --task "Phase 0: inspect live DB prerequisites"
+  bridge phase plan-review --run-id bridge-... --pr 12
+  bridge phase plan-fix --run-id bridge-... --pr 12
   bridge phase implement --run-id bridge-... --pr 12
   bridge phase review --run-id bridge-... --pr 12
   bridge phase watch --state complete --run-id bridge-... --pr 12
@@ -62,7 +69,7 @@ EOF
 cmd="${1:-}"
 case "$cmd" in
   -h|--help|'') usage; exit 0 ;;
-  run|resume|plan|implement|review|context|watch) shift ;;
+  run|resume|plan|plan-review|plan-fix|implement|review|context|watch) shift ;;
   *) die "unknown phase command: $cmd (try: bridge phase --help)" ;;
 esac
 
@@ -80,6 +87,8 @@ state=""
 timeout=""
 poll=""
 max_cycles=5
+max_plan_cycles=20
+review_plan=0
 auto_merge=1
 merge_requested=0
 dry_run=0
@@ -99,6 +108,8 @@ while [ $# -gt 0 ]; do
     --timeout)      timeout="${2:?--timeout requires value}"; shift 2 ;;
     --poll)         poll="${2:?--poll requires value}"; shift 2 ;;
     --max-cycles)   max_cycles="${2:?--max-cycles requires value}"; shift 2 ;;
+    --max-plan-cycles) max_plan_cycles="${2:?--max-plan-cycles requires value}"; shift 2 ;;
+    --review-plan)  review_plan=1; shift ;;
     --dry-run)      dry_run=1; shift ;;
     --merge)        auto_merge=1; merge_requested=1; shift ;;
     --no-merge)     auto_merge=0; shift ;;
@@ -327,6 +338,71 @@ _wait_review_result_after() {
   done
 }
 
+_wait_plan_review_result_after() {
+  # _wait_plan_review_result_after <createdAt> -> prints <result>\t<createdAt>\t<source>
+  # plan_approved here is intermediate; it never carries BRIDGE_PHASE_STATUS: completed
+  # and never permits a merge. The bridge waits separately for implementation
+  # approval before completion.
+  after_created=$1
+  start=$(date -u +%s)
+  deadline=$((start + timeout))
+  while :; do
+    now=$(date -u +%s)
+    [ "$now" -lt "$deadline" ] || die "timeout waiting for fresh plan review result"
+    found=$(_pr_latest_marker_after plan_approved "" "$after_created")
+    if [ -n "$found" ]; then printf "plan_approved\t%s\n" "$found"; return 0; fi
+    found=$(_pr_latest_marker_after plan_changes_requested "" "$after_created")
+    if [ -n "$found" ]; then printf "plan_changes_requested\t%s\n" "$found"; return 0; fi
+    sleep "$poll"
+  done
+}
+
+# _run_plan_review_loop <starting_status> <starting_since>
+# Drives Codex plan review and Claude plan-fix until plan_approved.
+# Sets globals on success: plan_review_since=<plan_approved createdAt>.
+_run_plan_review_loop() {
+  local plan_status="$1" plan_since="$2"
+  local plan_cycle=1
+  local fresh result result_created
+  while [ "$plan_cycle" -le "$max_plan_cycles" ]; do
+    case "$plan_status" in
+      plan_ready)
+        log_info "phase: plan-review cycle $plan_cycle/$max_plan_cycles"
+        set -- plan-review --repo "$repo" --pr "$pr" --run-id "$run_id" --source-agent "$source_agent"
+        [ -n "$reviewer_agent" ] && set -- "$@" --agent "$reviewer_agent"
+        "$_BRIDGE_BIN_DIR/bridge-phase" "$@"
+        fresh=$(_wait_plan_review_result_after "$plan_since")
+        result=$(printf "%s\n" "$fresh" | awk -F '\t' '{ print $1 }')
+        result_created=$(printf "%s\n" "$fresh" | awk -F '\t' '{ print $2 }')
+        plan_since="$result_created"
+        case "$result" in
+          plan_approved)
+            plan_review_since="$plan_since"
+            return 0
+            ;;
+          plan_changes_requested)
+            plan_status="plan_changes_requested"
+            ;;
+        esac
+        ;;
+      plan_changes_requested)
+        [ "$plan_cycle" -lt "$max_plan_cycles" ] || die "max plan-review cycles reached with plan_changes_requested"
+        log_info "phase: plan_changes_requested; nudging plan-fixer"
+        "$_BRIDGE_BIN_DIR/bridge-phase" plan-fix --repo "$repo" --pr "$pr" --run-id "$run_id" --source-agent "$source_agent"
+        log_info "phase: waiting for fresh plan_ready"
+        fresh=$(_wait_pr_for_status_after plan_ready "" "$plan_since")
+        plan_since=$(printf "%s\n" "$fresh" | awk -F '\t' '{ print $1 }')
+        plan_status="plan_ready"
+        plan_cycle=$((plan_cycle + 1))
+        ;;
+      *)
+        die "_run_plan_review_loop: unexpected starting status: $plan_status"
+        ;;
+    esac
+  done
+  die "phase exhausted plan-review cycles"
+}
+
 _warn_dirty_worktree() {
   if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     if [ -n "$(git status --porcelain 2>/dev/null || printf "")" ]; then
@@ -531,15 +607,28 @@ case "$cmd" in
       resume_source=$(printf "%s\n" "$latest" | awk -F '\t' '{ print $3 }')
       resume_created_at=$(printf "%s\n" "$latest" | awk -F '\t' '{ print $4 }')
       case "$resume_status:$resume_phase_status" in
-        plan_ready:*)                  resume_next_action="nudge_implementer" ;;
+        plan_ready:*)
+          if [ "$review_plan" -eq 1 ]; then
+            resume_next_action="run_plan_review"
+          else
+            resume_next_action="nudge_implementer"
+          fi
+          ;;
+        plan_approved:*)
+          resume_next_action="run_context_then_implementer"
+          ;;
+        plan_changes_requested:*)
+          resume_next_action="nudge_plan_fixer"
+          ;;
         implementation_ready:*|fixes_pushed:*) resume_next_action="nudge_reviewer" ;;
         changes_requested:*)           resume_next_action="nudge_implementer_for_fixes" ;;
         approved:completed)            resume_next_action="complete" ;;
         approved:*)                    resume_next_action="invalid_approved_missing_completed" ;;
         context_updated:*|context_noop:*)
           if _pr_has_marker "$pr" approved completed; then
-            _skip_context_sidecar=1
             resume_next_action="complete"
+          elif _pr_has_marker "$pr" plan_approved ""; then
+            resume_next_action="nudge_implementer_skip_context"
           else
             resume_next_action="unknown_status"
           fi
@@ -562,7 +651,6 @@ case "$cmd" in
         ;;
       complete)
         log_ok "phase resume: completed on PR #$pr run=$run_id"
-        [ "${_skip_context_sidecar:-0}" -eq 0 ] && _run_context_sidecar "$pr" "$resume_created_at"
         if [ "$auto_merge" -eq 1 ]; then
           _merge_pr "$pr"
         fi
@@ -572,9 +660,37 @@ case "$cmd" in
 
     "$_BRIDGE_BIN_DIR/bridge-start"
 
-    cycle=1
     current_status="$resume_status"
     current_since="$resume_created_at"
+
+    # Pre-loop staging: plan-review, plan-fix, and context sidecar.
+    # After these, the main loop continues from the equivalent of plan_ready
+    # (i.e. ready to nudge the implementer).
+    case "$resume_next_action" in
+      run_plan_review)
+        _run_plan_review_loop plan_ready "$current_since"
+        current_since="$plan_review_since"
+        log_ok "phase resume: plan_approved on PR #$pr"
+        _run_context_sidecar "$pr" "$current_since"
+        current_status="plan_ready"
+        ;;
+      nudge_plan_fixer)
+        _run_plan_review_loop plan_changes_requested "$current_since"
+        current_since="$plan_review_since"
+        log_ok "phase resume: plan_approved on PR #$pr"
+        _run_context_sidecar "$pr" "$current_since"
+        current_status="plan_ready"
+        ;;
+      run_context_then_implementer)
+        _run_context_sidecar "$pr" "$current_since"
+        current_status="plan_ready"
+        ;;
+      nudge_implementer_skip_context)
+        current_status="plan_ready"
+        ;;
+    esac
+
+    cycle=1
     while [ "$cycle" -le "$max_cycles" ]; do
       case "$current_status" in
         plan_ready)
@@ -594,7 +710,6 @@ case "$cmd" in
           case "$result" in
             complete)
               log_ok "phase resume: completed on PR #$pr run=$run_id"
-              _run_context_sidecar "$pr" "$result_created"
               if [ "$auto_merge" -eq 1 ]; then
                 _merge_pr "$pr"
               fi
@@ -651,6 +766,15 @@ case "$cmd" in
     latest=$(_pr_latest_state)
     current_since=$(printf "%s\n" "$latest" | awk -F '\t' '{ print $4 }')
 
+    # Plan-review is a hard gate for fresh runs.
+    _run_plan_review_loop plan_ready "$current_since"
+    current_since="$plan_review_since"
+    log_ok "phase run: plan_approved on PR #$pr"
+
+    # Context sidecar fires after plan approval and before implementation so
+    # docs land before code review. Failures here are non-fatal.
+    _run_context_sidecar "$pr" "$current_since"
+
     log_info "phase run: nudging implementer"
     "$_BRIDGE_BIN_DIR/bridge-phase" implement --repo "$repo" --pr "$pr" --run-id "$run_id" --source-agent "$source_agent"
     log_info "phase run: waiting for implementation_ready"
@@ -668,7 +792,6 @@ case "$cmd" in
       case "$result" in
         complete)
           log_ok "phase run: completed on PR #$pr run=$run_id"
-          _run_context_sidecar "$pr" "$result_created"
           if [ "$auto_merge" -eq 1 ]; then
             _merge_pr "$pr"
           fi
@@ -704,6 +827,38 @@ case "$cmd" in
       --template "$template_dir/orchestrator-prompt.md" \
       --task "$task" \
       --expected-output "A durable phase plan written to $phase_file and a GitHub comment with BRIDGE_STATUS: plan_ready." \
+      --status-marker "BRIDGE_STATUS: plan_ready"
+    ;;
+  plan-review)
+    [ -n "$agent" ] || agent="${BRIDGE_REVIEWER:-codex}"
+    [ -n "$run_id" ] || die "phase plan-review requires --run-id"
+    [ -n "$pr" ] || die "phase plan-review requires --pr"
+    [ -n "$task" ] || task="Adversarially review the phase plan in $phase_file for PR #$pr"
+    exec "$_BRIDGE_BIN_DIR/bridge-nudge" "$agent" \
+      --repo "$repo" \
+      --pr "$pr" \
+      --source-agent "$source_agent" \
+      --role plan_reviewer \
+      --run-id "$run_id" \
+      --template "$template_dir/plan-reviewer-prompt.md" \
+      --task "$task" \
+      --expected-output "Durable GitHub feedback on the phase plan and exactly one BRIDGE_STATUS: plan_approved or plan_changes_requested marker." \
+      --status-marker "BRIDGE_STATUS: plan_approved OR BRIDGE_STATUS: plan_changes_requested"
+    ;;
+  plan-fix)
+    [ -n "$agent" ] || agent="${BRIDGE_ORCHESTRATOR:-claude}"
+    [ -n "$run_id" ] || die "phase plan-fix requires --run-id"
+    [ -n "$pr" ] || die "phase plan-fix requires --pr"
+    [ -n "$task" ] || task="Address Codex plan review on PR #$pr. Revise $phase_file to resolve the findings, commit it, and post a fresh GitHub comment with BRIDGE_STATUS: plan_ready."
+    exec "$_BRIDGE_BIN_DIR/bridge-nudge" "$agent" \
+      --repo "$repo" \
+      --pr "$pr" \
+      --source-agent "$source_agent" \
+      --role plan_fixer \
+      --run-id "$run_id" \
+      --template "$template_dir/orchestrator-prompt.md" \
+      --task "$task" \
+      --expected-output "An updated $phase_file that resolves the plan review findings and a fresh GitHub comment with BRIDGE_STATUS: plan_ready." \
       --status-marker "BRIDGE_STATUS: plan_ready"
     ;;
   implement)

@@ -122,25 +122,34 @@ if [ "${1:-}" = "api" ]; then
           fi
           ;;
         run_stale)
+          plan_review_count=$(count_log 'NUDGE role=plan_reviewer')
           implementer_count=$(count_log 'NUDGE role=implementer')
           if [ "$implementer_count" -ge 2 ]; then
             jq -n \
+              --arg planapp "$(body_with bridge-one plan_approved)" \
               --arg oldfix "$(body_with bridge-one fixes_pushed)" \
               --arg impl "$(body_with bridge-one implementation_ready)" \
               --arg freshfix "$(body_with bridge-one fixes_pushed)" \
               '[
+                {created_at:"2026-05-03T00:00:30Z", body:$planapp},
                 {created_at:"2026-05-03T00:00:40Z", body:$oldfix},
                 {created_at:"2026-05-03T00:01:00Z", body:$impl},
                 {created_at:"2026-05-03T00:03:00Z", body:$freshfix}
               ]'
           elif [ "$implementer_count" -ge 1 ]; then
             jq -n \
+              --arg planapp "$(body_with bridge-one plan_approved)" \
               --arg oldfix "$(body_with bridge-one fixes_pushed)" \
               --arg impl "$(body_with bridge-one implementation_ready)" \
               '[
+                {created_at:"2026-05-03T00:00:30Z", body:$planapp},
                 {created_at:"2026-05-03T00:00:40Z", body:$oldfix},
                 {created_at:"2026-05-03T00:01:00Z", body:$impl}
               ]'
+          elif [ "$plan_review_count" -ge 1 ]; then
+            jq -n \
+              --arg planapp "$(body_with bridge-one plan_approved)" \
+              '[ {created_at:"2026-05-03T00:00:30Z", body:$planapp} ]'
           else
             printf '[]\n'
           fi
@@ -294,6 +303,11 @@ expect_log 'NUDGE role=implementer'
 expect_log 'NUDGE role=adversarial_reviewer'
 
 GH_SCENARIO=run_stale run_case run_stale_ignores_old_markers run --repo owner/repo --pr 42 --run-id bridge-one --task "Phase" --poll 0 --timeout 5 --no-merge
+if [ "$(grep -c 'NUDGE role=plan_reviewer' "$BRIDGE_TEST_LOG")" -ne 1 ]; then
+  printf 'expected exactly one plan_reviewer nudge for stale run case\n' >&2
+  cat "$BRIDGE_TEST_LOG" >&2
+  exit 1
+fi
 if [ "$(grep -c 'NUDGE role=implementer' "$BRIDGE_TEST_LOG")" -ne 2 ]; then
   printf 'expected exactly two implementer nudges for stale run case\n' >&2
   cat "$BRIDGE_TEST_LOG" >&2

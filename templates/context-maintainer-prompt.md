@@ -27,8 +27,15 @@ Docs hygiene only. You must not:
 - Duplicate guidance that already exists
 - Rewrite large sections when a small append or deletion would do
 
-Propose changes to: CLAUDE.md, AGENTS.md, and optionally .bridge/context/{{BRIDGE_RUN_ID}}.md
-Do not commit to the branch. Post a PR comment with proposed changes as inline diffs or before/after blocks so a human can apply them. If nothing worth updating, post a brief comment and emit BRIDGE_STATUS: context_noop.
+Allowed targets: CLAUDE.md, AGENTS.md, and optionally .bridge/context/{{BRIDGE_RUN_ID}}.md.
+
+You may commit docs-only changes to those allowed targets directly to the PR
+branch when the change clears the edit bar below. Non-docs files must not be
+touched. If you prefer not to commit, or if a human should arbitrate the
+wording, post a PR comment with the proposed change as an inline diff or a
+before/after block instead. Either way, end with exactly one BRIDGE_STATUS
+line. If nothing worth updating, post a brief comment and emit
+BRIDGE_STATUS: context_noop.
 </core_constraint>
 
 <inputs_to_read_first>
@@ -67,9 +74,11 @@ Bad candidates:
 </edit_rules>
 
 <bridge_output_contract>
-Post a single durable GitHub PR comment. Do not commit to the branch.
+Post a single durable GitHub PR comment that summarises what changed and why.
+You may also commit the docs-only edits directly to the PR branch as part of
+this run; non-docs files must not be touched in that commit.
 
-If you have proposed doc changes:
+If you have proposed (or applied) doc changes:
 
 BRIDGE_RUN_ID: {{BRIDGE_RUN_ID}}
 BRIDGE_STATUS: context_updated
@@ -80,7 +89,8 @@ BRIDGE_RUN_ID: {{BRIDGE_RUN_ID}}
 BRIDGE_STATUS: context_noop
 
 The comment must contain:
-- for each proposed change: the target file, a brief reason, and the exact diff or before/after block
+- for each change: the target file, a brief reason, and either the exact diff,
+  a before/after block, or a reference to the commit that applied it
 - BRIDGE_RUN_ID on its own line
 - exactly one BRIDGE_STATUS line as the final non-empty line
 
@@ -89,8 +99,9 @@ The bridge counts only explicit BRIDGE_STATUS markers.
 
 <final_check>
 Before posting:
-- Confirm you did not push any commits to the branch
-- Confirm each proposed change includes the target file and an exact diff or before/after block
+- Confirm any commit you pushed touches only allowed docs files
+- Confirm each change includes the target file and either an exact diff, a
+  before/after block, or a commit reference
 - Confirm the PR comment ends with exactly one BRIDGE_STATUS line
 - Confirm you did not emit BRIDGE_PHASE_STATUS: completed
 </final_check>
