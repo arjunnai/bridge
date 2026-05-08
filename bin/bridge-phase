@@ -17,7 +17,7 @@ _BRIDGE_LIB_DIR="$_BRIDGE_BIN_DIR/../lib"
 
 usage() {
   cat <<EOF
-usage: bridge phase <run|resume|plan|implement|review|watch> [options] [task]
+usage: bridge phase <run|resume|plan|implement|review|context|watch> [options] [task]
 
 Commands:
   run         Drive plan -> implement -> review -> fixes until phase complete.
@@ -25,6 +25,7 @@ Commands:
   plan        Nudge the configured orchestrator to write the phase plan.
   implement   Nudge the configured implementer to execute the phase plan.
   review      Nudge the configured reviewer for adversarial review.
+  context     Nudge the configured context_maintainer to update durable docs.
   watch       Wait for a phase marker: plan, implementation, or complete.
 
 Common options:
@@ -61,7 +62,7 @@ EOF
 cmd="${1:-}"
 case "$cmd" in
   -h|--help|'') usage; exit 0 ;;
-  run|resume|plan|implement|review|watch) shift ;;
+  run|resume|plan|implement|review|context|watch) shift ;;
   *) die "unknown phase command: $cmd (try: bridge phase --help)" ;;
 esac
 
@@ -445,6 +446,33 @@ _merge_pr() {
   esac
 }
 
+_run_context_sidecar() {
+  # _run_context_sidecar <pr> <after_created>
+  # Optional sidecar: nudge context_maintainer, wait for context_updated/context_noop.
+  # Never blocks merge on failure.
+  [ -n "${BRIDGE_CONTEXT_MAINTAINER:-}" ] || return 0
+  local sidecar_pr="$1" sidecar_after="$2" sidecar_timeout="${BRIDGE_CONTEXT_TIMEOUT:-600}"
+  log_info "phase run: nudging context_maintainer (sidecar)"
+  if ! "$_BRIDGE_BIN_DIR/bridge-phase" context \
+       --repo "$repo" --pr "$sidecar_pr" --run-id "$run_id" \
+       --source-agent "$source_agent"; then
+    log_warn "context_maintainer nudge failed; continuing to merge"
+    return 0
+  fi
+  local start now deadline found
+  start=$(date -u +%s)
+  deadline=$((start + sidecar_timeout))
+  while :; do
+    now=$(date -u +%s)
+    [ "$now" -lt "$deadline" ] || { log_warn "context_maintainer timed out; continuing to merge"; return 0; }
+    found=$(_pr_latest_marker_after context_updated "" "$sidecar_after" 2>/dev/null || true)
+    [ -n "$found" ] && { log_ok "context_maintainer: context_updated"; return 0; }
+    found=$(_pr_latest_marker_after context_noop "" "$sidecar_after" 2>/dev/null || true)
+    [ -n "$found" ] && { log_ok "context_maintainer: context_noop (no docs change needed)"; return 0; }
+    sleep "$poll"
+  done
+}
+
 case "$cmd" in
   resume)
     require_cmd gh
@@ -508,6 +536,13 @@ case "$cmd" in
         changes_requested:*)           resume_next_action="nudge_implementer_for_fixes" ;;
         approved:completed)            resume_next_action="complete" ;;
         approved:*)                    resume_next_action="invalid_approved_missing_completed" ;;
+        context_updated:*|context_noop:*)
+          if _pr_has_marker "$pr" approved completed; then
+            resume_next_action="complete"
+          else
+            resume_next_action="unknown_status"
+          fi
+          ;;
         *)                             resume_next_action="unknown_status" ;;
       esac
     fi
@@ -526,6 +561,7 @@ case "$cmd" in
         ;;
       complete)
         log_ok "phase resume: completed on PR #$pr run=$run_id"
+        _run_context_sidecar "$pr" "$resume_created_at"
         if [ "$auto_merge" -eq 1 ]; then
           _merge_pr "$pr"
         fi
@@ -557,6 +593,7 @@ case "$cmd" in
           case "$result" in
             complete)
               log_ok "phase resume: completed on PR #$pr run=$run_id"
+              _run_context_sidecar "$pr" "$result_created"
               if [ "$auto_merge" -eq 1 ]; then
                 _merge_pr "$pr"
               fi
@@ -630,6 +667,7 @@ case "$cmd" in
       case "$result" in
         complete)
           log_ok "phase run: completed on PR #$pr run=$run_id"
+          _run_context_sidecar "$pr" "$result_created"
           if [ "$auto_merge" -eq 1 ]; then
             _merge_pr "$pr"
           fi
@@ -698,6 +736,23 @@ case "$cmd" in
       --task "$task" \
       --expected-output "Durable GitHub review comments and BRIDGE_STATUS: approved or changes_requested." \
       --status-marker "BRIDGE_STATUS: approved OR BRIDGE_STATUS: changes_requested"
+    ;;
+  context)
+    [ -n "$agent" ] || agent="${BRIDGE_CONTEXT_MAINTAINER:-}"
+    [ -n "$agent" ] || die "phase context requires --agent or orchestration.context_maintainer in config"
+    [ -n "$run_id" ] || die "phase context requires --run-id"
+    [ -n "$pr" ] || die "phase context requires --pr"
+    [ -n "$task" ] || task="Update durable agent docs for PR #$pr against $phase_file"
+    exec "$_BRIDGE_BIN_DIR/bridge-nudge" "$agent" \
+      --repo "$repo" \
+      --pr "$pr" \
+      --source-agent "$source_agent" \
+      --role context_maintainer \
+      --run-id "$run_id" \
+      --template "$template_dir/context-maintainer-prompt.md" \
+      --task "$task" \
+      --expected-output "Docs-only commit on the PR branch (or a PR comment if nothing needed) plus exactly one BRIDGE_STATUS line." \
+      --status-marker "BRIDGE_STATUS: context_updated OR BRIDGE_STATUS: context_noop"
     ;;
   watch)
     [ -n "$pr" ] || die "phase watch requires --pr"

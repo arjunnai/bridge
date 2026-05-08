@@ -22,10 +22,11 @@ quiet_secs   = 90
 poll_secs    = 10
 
 [orchestration]
-orchestrator    = "claude"
-implementer     = "kiro"
-reviewer        = "codex"
-phase_plan_file = "BRIDGE_PHASE_PLAN.md"
+orchestrator       = "claude"
+implementer        = "kiro"
+reviewer           = "codex"
+phase_plan_file    = "BRIDGE_PHASE_PLAN.md"
+# context_maintainer = "context"  # optional sidecar; fires post-completed, pre-merge
 
 [agents.codex]
 session         = "codex"
@@ -48,3 +49,11 @@ command         = "kiro-cli chat --trust-all-tools --model claude-opus-4.7"
 role            = "implementer"
 prompt_template = "templates/implementer-prompt.md"
 github_login    = ""
+
+# Optional: docs-hygiene sidecar. Uncomment together with context_maintainer above.
+# [agents.context]
+# session         = "context"
+# command         = "opencode run -m kiro/deepseek-3.2 --dangerously-skip-permissions"
+# role            = "context_maintainer"
+# prompt_template = "templates/context-maintainer-prompt.md"
+# input_mode      = "stdin"

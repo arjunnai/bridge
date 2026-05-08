@@ -571,6 +571,8 @@ BRIDGE_STATUS: approved
 | `approved` | Reviewer approves current PR state. |
 | `validated` | Validator confirms requested state. |
 | `validation_failed` | Validator found unresolved work. |
+| `context_updated` | Context maintainer committed docs update post-completion. |
+| `context_noop` | Context maintainer found no durable updates needed. |
 
 Phase completion requires both:
 

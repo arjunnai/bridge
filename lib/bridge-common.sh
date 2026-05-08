@@ -16,6 +16,7 @@ BRIDGE_ORCHESTRATOR=""
 BRIDGE_IMPLEMENTER=""
 BRIDGE_REVIEWER=""
 BRIDGE_VALIDATOR=""
+BRIDGE_CONTEXT_MAINTAINER=""
 BRIDGE_PHASE_PLAN_FILE=""
 BRIDGE_ORCHESTRATION_PRESENT=0
 
@@ -168,8 +169,9 @@ bridge_parse_toml() {
           orchestrator)    BRIDGE_ORCHESTRATOR="$val" ;;
           implementer)     BRIDGE_IMPLEMENTER="$val" ;;
           reviewer)        BRIDGE_REVIEWER="$val" ;;
-          validator)       BRIDGE_VALIDATOR="$val" ;;
-          phase_plan_file) BRIDGE_PHASE_PLAN_FILE="$val" ;;
+          validator)          BRIDGE_VALIDATOR="$val" ;;
+          context_maintainer) BRIDGE_CONTEXT_MAINTAINER="$val" ;;
+          phase_plan_file)    BRIDGE_PHASE_PLAN_FILE="$val" ;;
         esac
         ;;
       agents.*)
@@ -402,6 +404,17 @@ bridge_orchestration_validate() {
     fi
     if [ "$BRIDGE_VALIDATOR" = "$BRIDGE_IMPLEMENTER" ]; then
       printf "orchestration.validator must not be the same agent as implementer (%s)\n" "$BRIDGE_IMPLEMENTER"
+      _errs=$((_errs + 1))
+    fi
+  fi
+
+  if [ -n "$BRIDGE_CONTEXT_MAINTAINER" ]; then
+    if ! agent_exists "$BRIDGE_CONTEXT_MAINTAINER"; then
+      printf "orchestration references context_maintainer '%s' not defined in [agents.*]\n" "$BRIDGE_CONTEXT_MAINTAINER"
+      _errs=$((_errs + 1))
+    fi
+    if [ "$BRIDGE_CONTEXT_MAINTAINER" = "$BRIDGE_IMPLEMENTER" ]; then
+      printf "orchestration.context_maintainer must not be the same agent as implementer (%s)\n" "$BRIDGE_IMPLEMENTER"
       _errs=$((_errs + 1))
     fi
   fi

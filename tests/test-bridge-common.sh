@@ -90,5 +90,49 @@ else
   ok "B.2: valid validator config produced no validator error"
 fi
 
+# --- C.1: context_maintainer orchestration validation ---
+
+BRIDGE_ORCHESTRATION_PRESENT=1
+BRIDGE_ORCHESTRATOR="myorch"
+BRIDGE_IMPLEMENTER="myimpl"
+BRIDGE_REVIEWER="myrev"
+BRIDGE_VALIDATOR=""
+BRIDGE_CONTEXT_MAINTAINER=""
+
+# 7. context_maintainer same as implementer must fail.
+BRIDGE_CONTEXT_MAINTAINER="myimpl"
+if ! bridge_orchestration_validate >/dev/null 2>&1; then
+  ok "C.1: context_maintainer=implementer rejected"
+else
+  fail "C.1: context_maintainer=implementer should have been rejected"
+fi
+
+# 8. Unknown context_maintainer must fail.
+BRIDGE_CONTEXT_MAINTAINER="nobody"
+if ! bridge_orchestration_validate >/dev/null 2>&1; then
+  ok "C.1: unknown context_maintainer rejected"
+else
+  fail "C.1: unknown context_maintainer should have been rejected"
+fi
+
+# 9. Valid context_maintainer (different from implementer, exists) must produce no context_maintainer error.
+agent_set myctx SESSION "s5"
+BRIDGE_CONTEXT_MAINTAINER="myctx"
+errors=$(bridge_orchestration_validate 2>/dev/null || true)
+if printf '%s' "$errors" | grep -q "context_maintainer"; then
+  fail "C.1: valid context_maintainer config still produced context_maintainer error: $errors"
+else
+  ok "C.1: valid context_maintainer config produced no context_maintainer error"
+fi
+
+# 10. Unset context_maintainer must produce no error.
+BRIDGE_CONTEXT_MAINTAINER=""
+errors=$(bridge_orchestration_validate 2>/dev/null || true)
+if printf '%s' "$errors" | grep -q "context_maintainer"; then
+  fail "C.1: empty context_maintainer produced unexpected error: $errors"
+else
+  ok "C.1: empty context_maintainer produces no error"
+fi
+
 printf "\nResults: %d passed, %d failed\n" "$pass" "$fail"
 [ "$fail" -eq 0 ]
