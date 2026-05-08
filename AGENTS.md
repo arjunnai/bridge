@@ -214,17 +214,17 @@ The validator does not replace the reviewer. It verifies the state of the loop.
 
 ### Context Maintainer
 
-The context maintainer is an optional sidecar role that runs once per phase, after `BRIDGE_PHASE_STATUS: completed` is confirmed and before the PR is merged.
+The context maintainer is an optional sidecar role that runs once per phase, after `BRIDGE_STATUS: plan_approved` is confirmed and before the implementer is nudged.
 
 Responsibilities:
 
-* read the phase plan, PR diff, commits, and all review comments
+* read the phase plan, PR body, prior comments, and the originating task
 * propose updates to `CLAUDE.md` and/or `AGENTS.md` — durable, non-obvious facts
 * flag stale guidance that this phase disproved
-* post a PR comment with proposed changes as inline diffs or before/after blocks (no branch commit — avoids staling the reviewer approval)
-* emit `BRIDGE_STATUS: context_updated` (changes proposed) or `BRIDGE_STATUS: context_noop` (nothing needed)
+* either post a PR comment with proposed changes as inline diffs or before/after blocks, or commit docs-only changes directly to the PR branch (allowed targets: `CLAUDE.md`, `AGENTS.md`, optionally `.bridge/context/<run-id>.md`)
+* emit `BRIDGE_STATUS: context_updated` (changes proposed or applied) or `BRIDGE_STATUS: context_noop` (nothing needed)
 
-The context maintainer must not edit source code, approve PRs, paste log dumps, or duplicate existing guidance. It is configured via `orchestration.context_maintainer` in `config.toml` and is never required — absent configuration, the phase loop skips it silently.
+The context maintainer must not edit source code, approve PRs, paste log dumps, or duplicate existing guidance. It is configured via `orchestration.context_maintainer` in `config.toml` and is never required — absent configuration, the phase loop skips it silently. The sidecar is soft-gated and non-fatal: timeout or failure logs a warning and the run continues to implementation. Docs-only commits posted by the sidecar do not invalidate `plan_approved` and do not require the plan to be re-reviewed.
 
 ---
 
@@ -325,6 +325,25 @@ Orchestrator statuses:
 BRIDGE_RUN_ID: <id>
 BRIDGE_STATUS: plan_ready
 ```
+
+Plan reviewer statuses (Codex, before any implementation):
+
+```text
+BRIDGE_RUN_ID: <id>
+BRIDGE_STATUS: plan_changes_requested
+```
+
+or:
+
+```text
+BRIDGE_RUN_ID: <id>
+BRIDGE_STATUS: plan_approved
+```
+
+`BRIDGE_STATUS: plan_approved` is intermediate. It never carries
+`BRIDGE_PHASE_STATUS: completed` and never permits a merge by itself; final
+completion still depends on the adversarial code review at the end of the
+run.
 
 Implementer statuses:
 

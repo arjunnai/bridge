@@ -78,6 +78,12 @@ bridge phase plan --task "<objective>"
 # Watch planning:
 bridge phase watch --state plan --pr <n> --run-id <id>
 
+# Nudge plan review (Codex adversarial review of the plan):
+bridge phase plan-review --pr <n> --run-id <id>
+
+# Nudge plan fix (orchestrator revises the plan after plan_changes_requested):
+bridge phase plan-fix --pr <n> --run-id <id>
+
 # Nudge implementation:
 bridge phase implement --pr <n> --run-id <id>
 
@@ -87,6 +93,10 @@ bridge phase watch --state implementation --pr <n> --run-id <id>
 # Nudge review:
 bridge phase review --pr <n> --run-id <id>
 ```
+
+`bridge phase resume --pr <n> --review-plan` opts an existing PR into the
+plan-review gate before the implementer is nudged. Default resume skips the
+gate for backward compatibility.
 
 ## Edge cases
 

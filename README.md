@@ -314,14 +314,21 @@ phase resume` never merges unless `--merge` is passed.
 ### How it works
 
 ```text
-orchestrator -> BRIDGE_PHASE_PLAN.md -> implementer -> PR -> Codex review -> fixes -> Codex approval
+orchestrator -> BRIDGE_PHASE_PLAN.md -> Codex plan review -> [plan_changes_requested -> orchestrator revises -> ...] -> Codex plan_approved
+                                                                                                                                |
+                                                                                            [optional sidecar] context_maintainer -> docs-only commit
+                                                                                                                                |
+implementer -> PR -> Codex code review -> fixes -> Codex approval + completed -> merge
 ```
 
 - **Orchestrator** (Claude or Codex) reads the task, writes a durable `BRIDGE_PHASE_PLAN.md`, and posts `BRIDGE_STATUS: plan_ready`.
-- **Implementer** (Claude or Kiro) reads the plan and implements. Posts `BRIDGE_STATUS: implementation_ready`.
-- **Reviewer** (Codex, always adversarial) reads the plan and the PR. Posts either `BRIDGE_STATUS: changes_requested` or `BRIDGE_STATUS: approved` + `BRIDGE_PHASE_STATUS: completed`.
-- **Context maintainer** (optional, any agent) fires once after completion, before merge. Posts a PR comment with proposed `CLAUDE.md`/`AGENTS.md` changes as diffs — no branch commit (avoids staling the approval). Emits `BRIDGE_STATUS: context_updated` or `BRIDGE_STATUS: context_noop`. Never blocks merge.
-- A phase ends only after Codex posts **both** markers.
+- **Plan reviewer** (Codex, adversarial) pressure-tests the plan and posts either `BRIDGE_STATUS: plan_changes_requested` or `BRIDGE_STATUS: plan_approved`. On `plan_changes_requested` the orchestrator revises the plan and re-posts a fresh `plan_ready`; the loop caps at 20 cycles (configurable via `--max-plan-cycles`).
+- **Context maintainer** (optional sidecar, any agent) fires once after `plan_approved` and before implementation. May post a PR comment with proposed `CLAUDE.md`/`AGENTS.md` updates and may commit docs-only changes directly to the PR branch. Emits `BRIDGE_STATUS: context_updated` or `BRIDGE_STATUS: context_noop`. Soft-gated and non-fatal: timeout or failure logs a warning and the run continues. Docs-only commits do not invalidate `plan_approved`.
+- **Implementer** (Claude or Kiro) reads the approved plan and implements. Posts `BRIDGE_STATUS: implementation_ready`.
+- **Code reviewer** (Codex, always adversarial) reads the plan and the PR. Posts either `BRIDGE_STATUS: changes_requested` or `BRIDGE_STATUS: approved` + `BRIDGE_PHASE_STATUS: completed`.
+- A phase ends only after Codex posts **both** approval markers. `BRIDGE_STATUS: plan_approved` is intermediate and never permits a merge by itself.
+
+The plan-review gate is mandatory for fresh `bridge phase run`. For `bridge phase resume`, the legacy default skips the gate and nudges the implementer directly on `plan_ready`; pass `--review-plan` to opt into the gate on an existing PR.
 
 **Kiro never plans.** Kiro is implementer/validator only.
 
@@ -567,13 +574,15 @@ BRIDGE_STATUS: approved
 | Status | Typical source |
 | --- | --- |
 | `plan_ready` | Orchestrator finished writing the phase plan. |
+| `plan_changes_requested` | Plan reviewer found material gaps in the plan. |
+| `plan_approved` | Plan reviewer accepted the plan. Intermediate; never permits merge. |
 | `implementation_ready` | Implementer says PR is ready for review. |
 | `fixes_pushed` | Implementer says requested fixes are pushed. |
 | `changes_requested` | Reviewer found material issues. |
 | `approved` | Reviewer approves current PR state. |
 | `validated` | Validator confirms requested state. |
 | `validation_failed` | Validator found unresolved work. |
-| `context_updated` | Context maintainer committed docs update post-completion. |
+| `context_updated` | Context maintainer posted or committed docs updates after `plan_approved`. |
 | `context_noop` | Context maintainer found no durable updates needed. |
 
 Phase completion requires both:
