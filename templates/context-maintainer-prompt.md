@@ -6,7 +6,7 @@ REPO: {{REPO}}
 PR: {{PR}}
 TASK: {{TASK}}
 PHASE_PLAN_FILE: {{PHASE_PLAN_FILE}}
-EXPECTED_OUTPUT: A docs-only commit on the PR branch updating CLAUDE.md and/or AGENTS.md (or a PR comment explaining why no update is needed), followed by exactly one final BRIDGE_STATUS line.
+EXPECTED_OUTPUT: A PR comment containing proposed doc updates as inline diffs or before/after blocks (or a brief note explaining why no update is needed), followed by exactly one final BRIDGE_STATUS line. Do not commit to the branch.
 STATUS_MARKER: BRIDGE_STATUS: context_updated  OR  BRIDGE_STATUS: context_noop
 
 <role>
@@ -27,8 +27,8 @@ Docs hygiene only. You must not:
 - Duplicate guidance that already exists
 - Rewrite large sections when a small append or deletion would do
 
-Target only: CLAUDE.md, AGENTS.md, and optionally .bridge/context/{{BRIDGE_RUN_ID}}.md
-One small, docs-only commit on the PR branch. If nothing worth updating, post a comment and emit BRIDGE_STATUS: context_noop — no commit needed.
+Propose changes to: CLAUDE.md, AGENTS.md, and optionally .bridge/context/{{BRIDGE_RUN_ID}}.md
+Do not commit to the branch. Post a PR comment with proposed changes as inline diffs or before/after blocks so a human can apply them. If nothing worth updating, post a brief comment and emit BRIDGE_STATUS: context_noop.
 </core_constraint>
 
 <inputs_to_read_first>
@@ -61,26 +61,26 @@ Bad candidates:
 
 <edit_rules>
 - Prefer deletion of stale guidance over addition of new guidance.
-- When adding, append to the relevant existing section; do not restructure the whole file.
-- Commit message must start with "docs:" and describe which doc was updated and why in one line.
+- When proposing additions, show exactly which section the text would go into.
+- Format each proposed change as a diff block or a clear before/after block so it can be applied with one paste.
 - Do not include BRIDGE_PHASE_STATUS: completed — that marker is for the adversarial reviewer only.
 </edit_rules>
 
 <bridge_output_contract>
-After editing (or deciding no edit is needed), post a single durable GitHub PR comment.
+Post a single durable GitHub PR comment. Do not commit to the branch.
 
-If you made doc changes and committed them:
+If you have proposed doc changes:
 
 BRIDGE_RUN_ID: {{BRIDGE_RUN_ID}}
 BRIDGE_STATUS: context_updated
 
-If no durable updates were needed:
+If no durable updates are needed:
 
 BRIDGE_RUN_ID: {{BRIDGE_RUN_ID}}
 BRIDGE_STATUS: context_noop
 
 The comment must contain:
-- one sentence describing what was updated (or why nothing was)
+- for each proposed change: the target file, a brief reason, and the exact diff or before/after block
 - BRIDGE_RUN_ID on its own line
 - exactly one BRIDGE_STATUS line as the final non-empty line
 
@@ -89,8 +89,8 @@ The bridge counts only explicit BRIDGE_STATUS markers.
 
 <final_check>
 Before posting:
-- Confirm the commit (if any) touches only CLAUDE.md, AGENTS.md, or .bridge/context/
-- Confirm the commit message starts with "docs:"
+- Confirm you did not push any commits to the branch
+- Confirm each proposed change includes the target file and an exact diff or before/after block
 - Confirm the PR comment ends with exactly one BRIDGE_STATUS line
 - Confirm you did not emit BRIDGE_PHASE_STATUS: completed
 </final_check>

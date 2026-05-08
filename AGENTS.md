@@ -219,10 +219,10 @@ The context maintainer is an optional sidecar role that runs once per phase, aft
 Responsibilities:
 
 * read the phase plan, PR diff, commits, and all review comments
-* update `CLAUDE.md` and/or `AGENTS.md` with durable, non-obvious facts
-* remove stale guidance that this phase disproved
-* commit docs-only changes on the PR branch (commit message starts with `docs:`)
-* post a PR comment with `BRIDGE_STATUS: context_updated` or `BRIDGE_STATUS: context_noop` (if nothing needed)
+* propose updates to `CLAUDE.md` and/or `AGENTS.md` — durable, non-obvious facts
+* flag stale guidance that this phase disproved
+* post a PR comment with proposed changes as inline diffs or before/after blocks (no branch commit — avoids staling the reviewer approval)
+* emit `BRIDGE_STATUS: context_updated` (changes proposed) or `BRIDGE_STATUS: context_noop` (nothing needed)
 
 The context maintainer must not edit source code, approve PRs, paste log dumps, or duplicate existing guidance. It is configured via `orchestration.context_maintainer` in `config.toml` and is never required — absent configuration, the phase loop skips it silently.
 

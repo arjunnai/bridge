@@ -538,6 +538,7 @@ case "$cmd" in
         approved:*)                    resume_next_action="invalid_approved_missing_completed" ;;
         context_updated:*|context_noop:*)
           if _pr_has_marker "$pr" approved completed; then
+            _skip_context_sidecar=1
             resume_next_action="complete"
           else
             resume_next_action="unknown_status"
@@ -561,7 +562,7 @@ case "$cmd" in
         ;;
       complete)
         log_ok "phase resume: completed on PR #$pr run=$run_id"
-        _run_context_sidecar "$pr" "$resume_created_at"
+        [ "${_skip_context_sidecar:-0}" -eq 0 ] && _run_context_sidecar "$pr" "$resume_created_at"
         if [ "$auto_merge" -eq 1 ]; then
           _merge_pr "$pr"
         fi
@@ -751,7 +752,7 @@ case "$cmd" in
       --run-id "$run_id" \
       --template "$template_dir/context-maintainer-prompt.md" \
       --task "$task" \
-      --expected-output "Docs-only commit on the PR branch (or a PR comment if nothing needed) plus exactly one BRIDGE_STATUS line." \
+      --expected-output "A PR comment with proposed doc changes as diffs/before-after blocks (no branch commit) plus exactly one BRIDGE_STATUS line." \
       --status-marker "BRIDGE_STATUS: context_updated OR BRIDGE_STATUS: context_noop"
     ;;
   watch)
