@@ -16,15 +16,15 @@
 </p>
 
 <p align="center">
-  <a href="#why">Why</a> -
-  <a href="#install">Install</a> -
-  <a href="#skills">Skills</a> -
-  <a href="#quickstart">Quickstart</a> -
-  <a href="#workflow">Workflow</a> -
-  <a href="#commands">Commands</a> -
-  <a href="#configuration">Configuration</a> -
-  <a href="#security">Security</a> -
-  <a href="docs/commands.md">Full command reference</a> -
+  <a href="#why">Why</a> ·
+  <a href="#install">Install</a> ·
+  <a href="#skills">Skills</a> ·
+  <a href="#quickstart">Quickstart</a> ·
+  <a href="#workflow">Workflow</a> ·
+  <a href="#commands">Commands</a> ·
+  <a href="#configuration">Configuration</a> ·
+  <a href="#security">Security</a> ·
+  <a href="docs/commands.md">Full command reference</a> ·
   <a href="docs/phase-orchestration.md">Phase orchestration</a>
 </p>
 
