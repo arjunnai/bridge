@@ -17,18 +17,20 @@ _BRIDGE_LIB_DIR="$_BRIDGE_BIN_DIR/../lib"
 
 usage() {
   cat <<EOF
-usage: bridge phase <run|resume|plan|plan-review|plan-fix|implement|review|context|watch> [options] [task]
+usage: bridge phase <run|resume|plan|plan-review|plan-fix|review-plan-file|implement|review|context|watch> [options] [task]
 
 Commands:
-  run          Drive plan -> plan-review -> context -> implement -> review -> fixes.
-  resume       Adopt or continue an existing PR from its latest bridge marker.
-  plan         Nudge the configured orchestrator to write the phase plan.
-  plan-review  Nudge the configured reviewer to adversarially review the plan.
-  plan-fix     Nudge the configured orchestrator to revise the plan after review.
-  implement    Nudge the configured implementer to execute the phase plan.
-  review       Nudge the configured reviewer for adversarial review.
-  context      Nudge the configured context_maintainer to update durable docs.
-  watch        Wait for a phase marker: plan, implementation, or complete.
+  run               Drive plan -> plan-review -> context -> implement -> review -> fixes.
+  resume            Adopt or continue an existing PR from its latest bridge marker.
+  plan              Nudge the configured orchestrator to write the phase plan.
+  plan-review       Nudge the configured reviewer to adversarially review the plan.
+  plan-fix          Nudge the configured orchestrator to revise the plan after review.
+  review-plan-file  Run plan-review/plan-fix loop against an existing plan file
+                    on disk; stops at plan_approved without implementing.
+  implement         Nudge the configured implementer to execute the phase plan.
+  review            Nudge the configured reviewer for adversarial review.
+  context           Nudge the configured context_maintainer to update durable docs.
+  watch             Wait for a phase marker: plan, implementation, or complete.
 
 Common options:
   --repo OWNER/REPO     repo override
@@ -42,6 +44,11 @@ Common options:
   --max-cycles N        implementation review/fix cycles for run (default: 5)
   --max-plan-cycles N   plan-review cycles before bailing (default: 20)
   --review-plan         resume: run the plan-review gate before implementation
+  --plan-file PATH      review-plan-file (and plan-review/plan-fix): the plan
+                        file to review or revise instead of the default
+                        BRIDGE_PHASE_PLAN.md
+  --fixer AGENT         review-plan-file: agent to nudge for plan fixes
+                        (defaults to orchestration.orchestrator)
   --dry-run             print detected resume state and next action only
   --merge               resume: merge after approved + completed (opt-in)
   --no-merge            do not merge after approved + completed
@@ -60,6 +67,7 @@ Examples:
   bridge phase plan --task "Phase 0: inspect live DB prerequisites"
   bridge phase plan-review --run-id bridge-... --pr 12
   bridge phase plan-fix --run-id bridge-... --pr 12
+  bridge phase review-plan-file --pr 12 --plan-file docs/architecture/foo.md
   bridge phase implement --run-id bridge-... --pr 12
   bridge phase review --run-id bridge-... --pr 12
   bridge phase watch --state complete --run-id bridge-... --pr 12
@@ -69,7 +77,7 @@ EOF
 cmd="${1:-}"
 case "$cmd" in
   -h|--help|'') usage; exit 0 ;;
-  run|resume|plan|plan-review|plan-fix|implement|review|context|watch) shift ;;
+  run|resume|plan|plan-review|plan-fix|review-plan-file|implement|review|context|watch) shift ;;
   *) die "unknown phase command: $cmd (try: bridge phase --help)" ;;
 esac
 
@@ -93,6 +101,8 @@ auto_merge=1
 merge_requested=0
 dry_run=0
 merge_method="squash"
+plan_file=""
+fixer_agent=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -110,6 +120,8 @@ while [ $# -gt 0 ]; do
     --max-cycles)   max_cycles="${2:?--max-cycles requires value}"; shift 2 ;;
     --max-plan-cycles) max_plan_cycles="${2:?--max-plan-cycles requires value}"; shift 2 ;;
     --review-plan)  review_plan=1; shift ;;
+    --plan-file)    plan_file="${2:?--plan-file requires value}"; shift 2 ;;
+    --fixer)        fixer_agent="${2:?--fixer requires value}"; shift 2 ;;
     --dry-run)      dry_run=1; shift ;;
     --merge)        auto_merge=1; merge_requested=1; shift ;;
     --no-merge)     auto_merge=0; shift ;;
@@ -370,6 +382,7 @@ _run_plan_review_loop() {
         log_info "phase: plan-review cycle $plan_cycle/$max_plan_cycles"
         set -- plan-review --repo "$repo" --pr "$pr" --run-id "$run_id" --source-agent "$source_agent"
         [ -n "$reviewer_agent" ] && set -- "$@" --agent "$reviewer_agent"
+        [ -n "$plan_file" ] && set -- "$@" --plan-file "$plan_file"
         "$_BRIDGE_BIN_DIR/bridge-phase" "$@"
         fresh=$(_wait_plan_review_result_after "$plan_since")
         result=$(printf "%s\n" "$fresh" | awk -F '\t' '{ print $1 }')
@@ -388,7 +401,10 @@ _run_plan_review_loop() {
       plan_changes_requested)
         [ "$plan_cycle" -lt "$max_plan_cycles" ] || die "max plan-review cycles reached with plan_changes_requested"
         log_info "phase: plan_changes_requested; nudging plan-fixer"
-        "$_BRIDGE_BIN_DIR/bridge-phase" plan-fix --repo "$repo" --pr "$pr" --run-id "$run_id" --source-agent "$source_agent"
+        set -- plan-fix --repo "$repo" --pr "$pr" --run-id "$run_id" --source-agent "$source_agent"
+        [ -n "$fixer_agent" ] && set -- "$@" --agent "$fixer_agent"
+        [ -n "$plan_file" ] && set -- "$@" --plan-file "$plan_file"
+        "$_BRIDGE_BIN_DIR/bridge-phase" "$@"
         log_info "phase: waiting for fresh plan_ready"
         fresh=$(_wait_pr_for_status_after plan_ready "" "$plan_since")
         plan_since=$(printf "%s\n" "$fresh" | awk -F '\t' '{ print $1 }')
@@ -833,8 +849,9 @@ case "$cmd" in
     [ -n "$agent" ] || agent="${BRIDGE_REVIEWER:-codex}"
     [ -n "$run_id" ] || die "phase plan-review requires --run-id"
     [ -n "$pr" ] || die "phase plan-review requires --pr"
-    [ -n "$task" ] || task="Adversarially review the phase plan in $phase_file for PR #$pr"
-    exec "$_BRIDGE_BIN_DIR/bridge-nudge" "$agent" \
+    effective_plan_file="${plan_file:-$phase_file}"
+    [ -n "$task" ] || task="Adversarially review the phase plan in $effective_plan_file for PR #$pr"
+    set -- "$agent" \
       --repo "$repo" \
       --pr "$pr" \
       --source-agent "$source_agent" \
@@ -844,13 +861,16 @@ case "$cmd" in
       --task "$task" \
       --expected-output "Durable GitHub feedback on the phase plan and exactly one BRIDGE_STATUS: plan_approved or plan_changes_requested marker." \
       --status-marker "BRIDGE_STATUS: plan_approved OR BRIDGE_STATUS: plan_changes_requested"
+    [ -n "$plan_file" ] && set -- "$@" --plan-file "$plan_file"
+    exec "$_BRIDGE_BIN_DIR/bridge-nudge" "$@"
     ;;
   plan-fix)
     [ -n "$agent" ] || agent="${BRIDGE_ORCHESTRATOR:-claude}"
     [ -n "$run_id" ] || die "phase plan-fix requires --run-id"
     [ -n "$pr" ] || die "phase plan-fix requires --pr"
-    [ -n "$task" ] || task="Address Codex plan review on PR #$pr. Revise $phase_file to resolve the findings, commit it, and post a fresh GitHub comment with BRIDGE_STATUS: plan_ready."
-    exec "$_BRIDGE_BIN_DIR/bridge-nudge" "$agent" \
+    effective_plan_file="${plan_file:-$phase_file}"
+    [ -n "$task" ] || task="Address Codex plan review on PR #$pr. Revise $effective_plan_file in place to resolve the findings (do not switch files or create a new plan), commit it, and post a fresh GitHub comment with BRIDGE_STATUS: plan_ready."
+    set -- "$agent" \
       --repo "$repo" \
       --pr "$pr" \
       --source-agent "$source_agent" \
@@ -858,8 +878,62 @@ case "$cmd" in
       --run-id "$run_id" \
       --template "$template_dir/orchestrator-prompt.md" \
       --task "$task" \
-      --expected-output "An updated $phase_file that resolves the plan review findings and a fresh GitHub comment with BRIDGE_STATUS: plan_ready." \
+      --expected-output "An updated $effective_plan_file that resolves the plan review findings and a fresh GitHub comment with BRIDGE_STATUS: plan_ready." \
       --status-marker "BRIDGE_STATUS: plan_ready"
+    [ -n "$plan_file" ] && set -- "$@" --plan-file "$plan_file"
+    exec "$_BRIDGE_BIN_DIR/bridge-nudge" "$@"
+    ;;
+  review-plan-file)
+    require_cmd gh
+    require_cmd jq
+    [ -n "$pr" ] || die "phase review-plan-file requires --pr"
+    case "$pr" in
+      ''|*[!0-9]*) die "PR must be a positive integer (got: $pr)" ;;
+    esac
+    [ -n "$plan_file" ] || die "phase review-plan-file requires --plan-file"
+    [ -f "$plan_file" ] || die "plan file not found: $plan_file"
+
+    # Reviewer agent precedence: --agent (one-shot) > --reviewer > config > default.
+    if [ -n "$agent" ]; then reviewer_agent="$agent"; fi
+    [ -n "$reviewer_agent" ] || reviewer_agent="${BRIDGE_REVIEWER:-codex}"
+    [ -n "$fixer_agent" ]    || fixer_agent="${BRIDGE_ORCHESTRATOR:-claude}"
+
+    # Resolve run-id: explicit, adopted from a single existing marker, or new.
+    if [ -z "$run_id" ]; then
+      discovered=$(_pr_run_ids)
+      discovered_count=$(printf "%s\n" "$discovered" | awk 'NF { c++ } END { print c + 0 }')
+      case "$discovered_count" in
+        0) run_id=$(bridge_generate_run_id) ;;
+        1) run_id=$(printf "%s\n" "$discovered" | awk 'NF { print; exit }') ;;
+        *) die "PR #$pr has multiple BRIDGE_RUN_ID markers; pass --run-id with the exact run to use" ;;
+      esac
+    fi
+
+    log_info "phase review-plan-file: pr=$pr run_id=$run_id plan_file=$plan_file reviewer=$reviewer_agent fixer=$fixer_agent"
+
+    if [ "$dry_run" -eq 1 ]; then
+      printf "repo=%s\npr=%s\nrun_id=%s\nplan_file=%s\nreviewer=%s\nfixer=%s\nnext_action=%s\n" \
+        "$repo" "$pr" "$run_id" "$plan_file" "$reviewer_agent" "$fixer_agent" "run_plan_review"
+      exit 0
+    fi
+
+    # Post a durable adoption comment so the plan-review state machine has a
+    # fresh BRIDGE_STATUS: plan_ready anchor for THIS run-id and so a follow-up
+    # `bridge phase resume` can pick up the resulting markers.
+    adopt_iso=$(bridge_now_iso)
+    adopt_body="BRIDGE_RUN_ID: $run_id
+BRIDGE_STATUS: plan_ready
+
+Bridge phase review-plan-file adopted this PR for plan review.
+
+PHASE_PLAN_FILE: $plan_file"
+    gh api "repos/$repo/issues/$pr/comments" -f "body=$adopt_body" >/dev/null
+
+    "$_BRIDGE_BIN_DIR/bridge-start"
+
+    _run_plan_review_loop plan_ready "$adopt_iso"
+    log_ok "phase review-plan-file: plan_approved on PR #$pr (no implementation triggered)"
+    exit 0
     ;;
   implement)
     [ -n "$agent" ] || agent="${BRIDGE_IMPLEMENTER:-kiro}"

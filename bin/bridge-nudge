@@ -37,6 +37,7 @@ Options:
   --task TEXT               task description for header / template
   --expected-output TEXT    expected output for header / template
   --status-marker TEXT      required reply marker for header / template
+  --plan-file PATH          override the rendered PHASE_PLAN_FILE for this nudge
   --header                  force-prepend the handoff header
   --no-header               never prepend the handoff header
   --strict-template         fail if template still has unfilled {{PLACEHOLDERS}}
@@ -62,6 +63,7 @@ run_id=""
 task=""
 expected=""
 status_marker=""
+plan_file_override=""
 header_mode="auto"
 strict=0
 session_override=""
@@ -78,6 +80,7 @@ while [ $# -gt 0 ]; do
     --task)            task="${2:?--task requires value}"; shift 2 ;;
     --expected-output) expected="${2:?--expected-output requires value}"; shift 2 ;;
     --status-marker)   status_marker="${2:?--status-marker requires value}"; shift 2 ;;
+    --plan-file)       plan_file_override="${2:?--plan-file requires value}"; shift 2 ;;
     --session)         session_override="${2:?--session requires value}"; shift 2 ;;
     --header)          header_mode="force"; shift ;;
     --no-header)       header_mode="off"; shift ;;
@@ -157,7 +160,11 @@ prompt=$(_render REVIEW_MODE      "$review_mode"                     "$prompt")
 prompt=$(_render TASK             "$task"                            "$prompt")
 prompt=$(_render EXPECTED_OUTPUT  "$expected"                        "$prompt")
 prompt=$(_render STATUS_MARKER    "$status_marker"                   "$prompt")
-prompt=$(_render PHASE_PLAN_FILE  "$(bridge_phase_plan_file)"        "$prompt")
+if [ -n "$plan_file_override" ]; then
+  prompt=$(_render PHASE_PLAN_FILE  "$plan_file_override"            "$prompt")
+else
+  prompt=$(_render PHASE_PLAN_FILE  "$(bridge_phase_plan_file)"      "$prompt")
+fi
 prompt=$(_render ORCHESTRATOR     "${BRIDGE_ORCHESTRATOR:-}"         "$prompt")
 prompt=$(_render IMPLEMENTER      "${BRIDGE_IMPLEMENTER:-}"          "$prompt")
 prompt=$(_render REVIEWER         "${BRIDGE_REVIEWER:-}"             "$prompt")

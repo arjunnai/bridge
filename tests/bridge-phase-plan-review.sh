@@ -23,9 +23,11 @@ cat > "$WORK/bin/bridge-nudge" <<'STUB'
 set -eu
 agent=""
 role=""
+plan_file=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --role) role="$2"; shift 2 ;;
+    --plan-file) plan_file="$2"; shift 2 ;;
     --repo|--pr|--source-agent|--template|--task|--expected-output|--status-marker|--run-id|--session|--agent)
       [ "$1" = "--agent" ] && agent="$2"
       shift 2
@@ -38,7 +40,7 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
-printf 'NUDGE role=%s agent=%s\n' "$role" "$agent" >> "${BRIDGE_TEST_LOG:?}"
+printf 'NUDGE role=%s agent=%s plan_file=%s\n' "$role" "$agent" "$plan_file" >> "${BRIDGE_TEST_LOG:?}"
 STUB
 chmod +x "$WORK/bin/bridge-nudge"
 
@@ -138,6 +140,36 @@ emit_comments_plan_approved_no_merge() {
   printf '[]\n'
 }
 
+emit_comments_rpf_markerless() {
+  pr_count=$(count_log 'NUDGE role=plan_reviewer')
+  if [ "$pr_count" -ge 1 ]; then
+    rid=$(sed -n 's/^COMMENT BRIDGE_RUN_ID: \([^[:space:]]*\).*/\1/p' "${BRIDGE_TEST_LOG:?}" | tail -1)
+    jq -n --arg b "$(body_with "$rid" plan_approved)" \
+      '[{created_at:"2099-01-01T00:00:00Z", body:$b}]'
+  else
+    printf '[]\n'
+  fi
+}
+
+emit_comments_rpf_changes() {
+  pr_count=$(count_log 'NUDGE role=plan_reviewer')
+  fix_count=$(count_log 'NUDGE role=plan_fixer')
+  events='[]'
+  if [ "$pr_count" -ge 1 ]; then
+    events=$(printf '%s' "$events" | jq --arg b "$(body_with bridge-rpf plan_changes_requested)" \
+      '. + [{created_at:"2099-01-01T00:00:00Z", body:$b}]')
+  fi
+  if [ "$fix_count" -ge 1 ]; then
+    events=$(printf '%s' "$events" | jq --arg b "$(body_with bridge-rpf plan_ready)" \
+      '. + [{created_at:"2099-01-02T00:00:00Z", body:$b}]')
+  fi
+  if [ "$pr_count" -ge 2 ]; then
+    events=$(printf '%s' "$events" | jq --arg b "$(body_with bridge-rpf plan_approved)" \
+      '. + [{created_at:"2099-01-03T00:00:00Z", body:$b}]')
+  fi
+  printf '%s\n' "$events"
+}
+
 if [ "${1:-}" = "api" ]; then
   endpoint=${2:?}
   shift 2
@@ -164,6 +196,9 @@ if [ "${1:-}" = "api" ]; then
         plan_approved_resume|plan_approved_no_merge)
           body="$(body_with bridge-one plan_approved)"
           ;;
+        rpf_markerless|rpf_changes)
+          body=""
+          ;;
         *) body="" ;;
       esac
       if [ "$wants_body_jq" -eq 1 ]; then
@@ -180,6 +215,8 @@ if [ "${1:-}" = "api" ]; then
         legacy_resume_plan_ready) emit_comments_legacy_resume_plan_ready ;;
         plan_approved_resume)     emit_comments_plan_approved_resume ;;
         plan_approved_no_merge)   emit_comments_plan_approved_no_merge ;;
+        rpf_markerless)           emit_comments_rpf_markerless ;;
+        rpf_changes)              emit_comments_rpf_changes ;;
         *)                        printf '[]\n' ;;
       esac
       ;;
@@ -331,5 +368,62 @@ if GH_SCENARIO=plan_approved_no_merge run_case plan_approved_no_merge resume \
 fi
 reject_log '^MERGE '
 expect_log 'NUDGE role=implementer'
+
+# review-plan-file: existing plan file on disk, markerless PR, no --run-id.
+# Bridge auto-generates a run_id, posts an adoption comment, runs the
+# plan-review loop, and exits at plan_approved without nudging an
+# implementer or invoking the orchestrator/planner.
+mkdir -p "$WORK/docs"
+cat > "$WORK/docs/myplan.md" <<EOF
+# Final pipeline plan
+
+stub content for tests
+EOF
+
+GH_SCENARIO=rpf_markerless run_case rpf_markerless review-plan-file \
+  --repo owner/repo --pr 42 --plan-file "$WORK/docs/myplan.md" \
+  --poll 0 --timeout 5
+expect_log '^COMMENT BRIDGE_RUN_ID: bridge-'
+expect_log "NUDGE role=plan_reviewer"
+expect_log "plan_file=$WORK/docs/myplan.md"
+expect_count 'NUDGE role=plan_reviewer' 1
+reject_log 'NUDGE role=orchestrator'
+reject_log 'NUDGE role=plan_fixer'
+reject_log 'NUDGE role=implementer'
+reject_log 'NUDGE role=adversarial_reviewer'
+
+# review-plan-file with plan_changes_requested: bridge routes the fix back
+# to the configured fixer (Claude by default; here overridden via --fixer)
+# on the SAME plan file path, then re-reviews until plan_approved. No
+# implementer nudge.
+GH_SCENARIO=rpf_changes run_case rpf_changes review-plan-file \
+  --repo owner/repo --pr 42 --plan-file "$WORK/docs/myplan.md" \
+  --run-id bridge-rpf --fixer claude \
+  --poll 0 --timeout 10
+expect_count 'NUDGE role=plan_reviewer' 2
+expect_count 'NUDGE role=plan_fixer' 1
+expect_log "NUDGE role=plan_fixer agent=claude plan_file=$WORK/docs/myplan.md"
+expect_log "NUDGE role=plan_reviewer agent=codex plan_file=$WORK/docs/myplan.md"
+reject_log 'NUDGE role=implementer'
+reject_log 'NUDGE role=adversarial_reviewer'
+
+# review-plan-file requires --plan-file. Missing path must error.
+if GH_SCENARIO=rpf_markerless run_case rpf_no_plan_file review-plan-file \
+   --repo owner/repo --pr 42 --poll 0 --timeout 5 \
+   >"$WORK/out" 2>"$WORK/err"; then
+  printf 'rpf_no_plan_file unexpectedly passed\n' >&2
+  exit 1
+fi
+grep -q 'requires --plan-file' "$WORK/err"
+
+# review-plan-file rejects a plan-file path that does not exist.
+if GH_SCENARIO=rpf_markerless run_case rpf_missing_plan_file review-plan-file \
+   --repo owner/repo --pr 42 --plan-file "$WORK/does-not-exist.md" \
+   --poll 0 --timeout 5 \
+   >"$WORK/out" 2>"$WORK/err"; then
+  printf 'rpf_missing_plan_file unexpectedly passed\n' >&2
+  exit 1
+fi
+grep -q 'plan file not found' "$WORK/err"
 
 printf 'bridge phase plan-review fixture tests passed\n'
