@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/bridge-logo.png" alt="bridge" width="480">
+  <img src="assets/bridge-banner.jpg" alt="bridge" width="100%">
 </p>
 
 <h1 align="center">Local agents. Durable PR state.</h1>
