@@ -23,7 +23,9 @@
   <a href="#workflow">Workflow</a> -
   <a href="#commands">Commands</a> -
   <a href="#configuration">Configuration</a> -
-  <a href="#security">Security</a>
+  <a href="#security">Security</a> -
+  <a href="docs/commands.md">Full command reference</a> -
+  <a href="docs/phase-orchestration.md">Phase orchestration</a>
 </p>
 
 ---
@@ -210,294 +212,48 @@ validator workflows.
 
 ## Commands
 
-### `bridge-start`
-
-Start one or more agent sessions:
-
-```bash
-bridge-start
-bridge-start codex claude
-```
-
-Existing sessions are left running. Command strings with arguments are
-preserved with `tmux new-session -d -s "$session" "$command"`.
-
-### `bridge-nudge`
-
-Paste a prompt into an agent session through a named tmux buffer:
-
-```bash
-bridge-nudge codex "Review PR 42"
-echo "Implement task" | bridge-nudge kiro
-bridge-nudge claude --template templates/implementer-prompt.md \
-                    --pr 42 \
-                    --task "Add retry to fetch()" \
-                    --source-agent codex
-```
-
-Supported template placeholders:
-
-| Placeholder | Meaning |
+| Command | What it does |
 | --- | --- |
-| `{{BRIDGE_RUN_ID}}` | Unique run ID, generated if absent. |
-| `{{REPO}}` | GitHub repo. |
-| `{{PR}}` | Pull request number. |
-| `{{SOURCE_AGENT}}` | Agent handing off work. |
-| `{{TARGET_AGENT}}` | Agent being nudged. |
-| `{{TARGET_LOGIN}}` | Target agent GitHub login from config. |
-| `{{ROLE}}` | Target role. |
-| `{{TASK}}` | Task text. |
-| `{{EXPECTED_OUTPUT}}` | Expected durable result. |
-| `{{STATUS_MARKER}}` | Required status marker. |
-| `{{PHASE_PLAN_FILE}}` | Phase plan file path (from `[orchestration]` or default). |
-| `{{ORCHESTRATOR}}` | Configured orchestrator agent name. |
-| `{{IMPLEMENTER}}` | Configured implementer agent name. |
-| `{{REVIEWER}}` | Configured reviewer agent name. |
+| `bridge doctor` | Diagnose tools, auth, config, sessions. Exits non-zero on hard failures. |
+| `bridge start` | Start tmux sessions for configured agents (idempotent). |
+| `bridge nudge` | Paste a structured prompt into an agent session via named tmux buffer. |
+| `bridge watch` | Wait for explicit `BRIDGE_STATUS` markers on a PR. |
+| `bridge phase` | Drive or resume the full plan → review → implement → approve lifecycle. |
+| `bridge ps` | List active bridge runs across open PRs with current status. |
+| `bridge logs` | Replay the run journal for a bridge run (`--last`, `--pr`, `--run-id`). |
 
-Use `--strict-template` to fail if placeholders remain unfilled.
+**→ [Full command reference](docs/commands.md)** — all flags, options, and template placeholders.
 
-### `bridge-watch`
-
-Wait for explicit status markers on a PR:
+### Quick examples
 
 ```bash
-bridge-watch 42
-bridge-watch 42 --agent codex
-bridge-watch 42 --author codex-bot --run-id bridge-2026-05-03T12-00-00Z-ab12
-bridge-watch 42 --status approved --timeout 600 --poll 5
+bridge doctor
+bridge start
+bridge phase run --task "Phase 0: inspect live DB prerequisites"
+bridge phase resume --pr 42
+bridge phase resume --pr 42 --dry-run          # inspect state only
+bridge phase review-plan-file --pr 42 --plan-file docs/plan.md
+bridge ps                                      # what runs are alive?
+bridge logs                                    # replay last run journal
+bridge logs --pr 42                            # resolve by PR
+bridge watch 42 --status approved
 ```
-
-Channels:
-
-| Channel | Completes watch? | Notes |
-| --- | --- | --- |
-| Issue comments | Yes | Precise `created_at`. Preferred. |
-| PR reviews | Yes | Precise `submitted_at`; body must be non-empty. Preferred. |
-| Inline review comments | Yes | Waits `--quiet` seconds after the last inline match. |
-| PR body | Yes | Coarse `updated_at`; less precise than comments and reviews. |
-| Commits | No | Logged only. Re-post commit markers in a comment or review. |
-
-Filters:
-
-| Flag | Effect |
-| --- | --- |
-| `--agent codex` | Match author to configured `github_login`; fails if missing. |
-| `--author LOGIN` | Match exact GitHub login. |
-| `--run-id ID` | Require exact `BRIDGE_RUN_ID:` line. |
-| `--status VALUE` | Require exact `BRIDGE_STATUS:` value. |
-
-Hard GitHub failures such as auth errors, permission errors, missing repos,
-and missing PRs exit immediately. HTTP 5xx and network blips retry until
-timeout.
-
-### `bridge-doctor`
-
-Diagnose the local bridge environment:
-
-```bash
-bridge-doctor
-```
-
-Checks required tools, `gh` auth, repo detection, config health, agent command
-availability, tmux session status, and **orchestration config validity**.
-Invalid `[orchestration]` config is a hard failure. Exits non-zero on hard failures.
 
 ---
 
-## Phase Orchestration (v1)
-
-v1 adds a first-class orchestrator/planner phase before implementation.
-No daemon. No hosted service. No automatic merge in low-level primitives.
-`bridge phase run` may merge after explicit Codex bridge approval. `bridge
-phase resume` never merges unless `--merge` is passed.
-
-### How it works
+## Phase Orchestration
 
 ```text
-orchestrator -> BRIDGE_PHASE_PLAN.md -> Codex plan review -> [plan_changes_requested -> orchestrator revises -> ...] -> Codex plan_approved
-                                                                                                                                |
-                                                                                            [optional sidecar] context_maintainer -> docs-only commit
-                                                                                                                                |
-implementer -> PR -> Codex code review -> fixes -> Codex approval + completed -> merge
+orchestrator → plan → Codex plan-review loop → plan_approved
+                                                     │
+                                   [optional] context_maintainer
+                                                     │
+                         implementer → PR → Codex review → fixes → approved + completed
 ```
 
-- **Orchestrator** (Claude or Codex) reads the task, writes a durable `BRIDGE_PHASE_PLAN.md`, and posts `BRIDGE_STATUS: plan_ready`.
-- **Plan reviewer** (Codex, adversarial) pressure-tests the plan and posts either `BRIDGE_STATUS: plan_changes_requested` or `BRIDGE_STATUS: plan_approved`. On `plan_changes_requested` the orchestrator revises the plan and re-posts a fresh `plan_ready`; the loop caps at 20 cycles (configurable via `--max-plan-cycles`).
-- **Context maintainer** (optional sidecar, any agent) fires once after `plan_approved` and before implementation. May post a PR comment with proposed `CLAUDE.md`/`AGENTS.md` updates and may commit docs-only changes directly to the PR branch. Emits `BRIDGE_STATUS: context_updated` or `BRIDGE_STATUS: context_noop`. Soft-gated and non-fatal: timeout or failure logs a warning and the run continues. Docs-only commits do not invalidate `plan_approved`.
-- **Implementer** (Claude or Kiro) reads the approved plan and implements. Posts `BRIDGE_STATUS: implementation_ready`.
-- **Code reviewer** (Codex, always adversarial) reads the plan and the PR. Posts either `BRIDGE_STATUS: changes_requested` or `BRIDGE_STATUS: approved` + `BRIDGE_PHASE_STATUS: completed`.
-- A phase ends only after Codex posts **both** approval markers. `BRIDGE_STATUS: plan_approved` is intermediate and never permits a merge by itself.
+`bridge phase run` drives the full lifecycle automatically. `bridge phase resume` picks up any existing PR from its current marker. `bridge phase review-plan-file` pressure-tests a plan file before any code is written.
 
-The plan-review gate is mandatory for fresh `bridge phase run`. For `bridge phase resume`, the legacy default skips the gate and nudges the implementer directly on `plan_ready`; pass `--review-plan` to opt into the gate on an existing PR.
-
-**Kiro never plans.** Kiro is implementer/validator only.
-
-### Config
-
-```toml
-[orchestration]
-orchestrator       = "claude"
-implementer        = "kiro"
-reviewer           = "codex"
-phase_plan_file    = "BRIDGE_PHASE_PLAN.md"
-# context_maintainer = "context"  # optional
-
-[agents.claude]
-session         = "claude"
-command         = "claude"
-role            = "orchestrator"
-prompt_template = "templates/orchestrator-prompt.md"
-
-[agents.kiro]
-session         = "kiro"
-command         = "kiro-cli chat --trust-all-tools --model claude-opus-4.7"
-role            = "implementer"
-prompt_template = "templates/implementer-prompt.md"
-
-[agents.codex]
-session         = "codex"
-command         = "codex --yolo"
-role            = "reviewer"
-review_mode     = "adversarial"
-prompt_template = "templates/reviewer-prompt.md"
-```
-
-Invalid orchestration config is a hard failure in `bridge-doctor`.
-
-### Example A: Claude orchestrates, Kiro implements, Codex reviews
-
-Short form:
-
-```bash
-bridge start
-bridge phase run --task "Phase 0: inspect live DB prerequisites"
-```
-
-`bridge phase run` opens or uses a normal PR, not a draft PR. When Codex posts
-`BRIDGE_STATUS: approved` plus `BRIDGE_PHASE_STATUS: completed`, the driver
-merges the PR by default. Use `--no-merge` to stop after approval, or
-`--merge-method merge|squash|rebase` to choose the merge strategy.
-
-Resume an existing bridge PR:
-
-```bash
-bridge phase resume --pr 42
-```
-
-`bridge phase resume` is the agent-driver UX for picking up work already on a
-PR. It reads PR body, issue comments, reviews, and inline comments, discovers
-the run ID when exactly one `BRIDGE_RUN_ID:` marker exists, infers the next
-step, nudges the right tmux agent, and watches until phase completion. It does
-not merge by default; pass `--merge` to merge only after Codex posts both
-`BRIDGE_STATUS: approved` and `BRIDGE_PHASE_STATUS: completed`.
-
-Adopt a markerless PR by giving the task explicitly:
-
-```bash
-bridge phase resume --pr 42 --task "Review the existing implementation for phase 1"
-```
-
-Adoption posts a durable PR comment with a new `BRIDGE_RUN_ID:` and treats the
-current PR head as `implementation_ready`, so Codex reviews the current code
-first. Use `--dry-run` to print the detected state and next action without
-posting comments, nudging agents, or merging.
-
-Manual form, when an operator wants to step through each transition:
-
-```bash
-bridge phase plan --task "Phase 0: inspect live DB prerequisites"
-bridge phase watch --state plan --pr 42 --run-id bridge-...
-bridge phase implement --pr 42 --run-id bridge-...
-bridge phase watch --state implementation --pr 42 --run-id bridge-...
-bridge phase review --pr 42 --run-id bridge-...
-bridge phase watch --state complete --pr 42 --run-id bridge-...
-```
-
-Expanded form:
-
-```bash
-bridge-start
-
-export BRIDGE_RUN_ID="$(
-  bin/bridge-nudge claude \
-    --template templates/orchestrator-prompt.md \
-    --task "Plan phase 1" \
-    --pr 42 \
-    2>&1 | awk -F= '/^BRIDGE_RUN_ID=/{print $2}'
-)"
-
-bin/bridge-watch 42 --status plan_ready --run-id "$BRIDGE_RUN_ID"
-
-bin/bridge-nudge kiro \
-  --template templates/implementer-prompt.md \
-  --run-id "$BRIDGE_RUN_ID" \
-  --task "Implement the phase in BRIDGE_PHASE_PLAN.md" \
-  --pr 42
-
-bin/bridge-watch 42 --status implementation_ready --run-id "$BRIDGE_RUN_ID"
-
-bin/bridge-nudge codex \
-  --template templates/reviewer-prompt.md \
-  --run-id "$BRIDGE_RUN_ID" \
-  --pr 42
-
-bin/bridge-watch 42 --status approved --phase-status completed --run-id "$BRIDGE_RUN_ID"
-```
-
-Codex operators should prefer the `bridge phase ...` short form or the bundled
-`bridge-phase` Codex skill. Humans should not need to assemble
-`BRIDGE_RUN_ID` export pipelines or manually nudge each role by hand.
-
-### Claude Profile Aliases
-
-If a Claude profile is a shell alias, launch it through that shell in
-`config.toml`:
-
-```toml
-[agents.claude]
-session = "claude"
-command = "fish -lc 'claude-eparts --dangerously-skip-permissions'"
-role = "orchestrator"
-```
-
-Known UX gap: Claude may still show a one-time workspace trust or bypass-mode
-acceptance screen before the pane is usable. Bridge does not yet detect and
-clear that prompt automatically.
-
-### Example B: Codex orchestrates, Claude implements, Codex reviews
-
-Codex may plan and later review the same phase. Codex must not implement.
-Implementation must be done by Claude or Kiro. Codex must not approve code it
-implemented itself.
-
-```bash
-bridge-start
-
-export BRIDGE_RUN_ID="$(
-  bin/bridge-nudge codex \
-    --template templates/orchestrator-prompt.md \
-    --task "Plan phase 1" \
-    --pr 42 \
-    2>&1 | awk -F= '/^BRIDGE_RUN_ID=/{print $2}'
-)"
-
-bin/bridge-watch 42 --status plan_ready --run-id "$BRIDGE_RUN_ID"
-
-bin/bridge-nudge claude \
-  --template templates/implementer-prompt.md \
-  --run-id "$BRIDGE_RUN_ID" \
-  --task "Implement the phase in BRIDGE_PHASE_PLAN.md" \
-  --pr 42
-
-bin/bridge-watch 42 --status implementation_ready --run-id "$BRIDGE_RUN_ID"
-
-bin/bridge-nudge codex \
-  --template templates/reviewer-prompt.md \
-  --run-id "$BRIDGE_RUN_ID" \
-  --pr 42
-
-bin/bridge-watch 42 --status approved --phase-status completed --run-id "$BRIDGE_RUN_ID"
-```
+**→ [Phase orchestration guide](docs/phase-orchestration.md)** — config, all subcommands, examples, and status markers.
 
 ---
 
@@ -644,9 +400,11 @@ bridge-watch 42 --agent codex \
 ## Project layout
 
 ```text
-bin/             bridge-start, bridge-nudge, bridge-watch, bridge-phase, bridge-doctor
+bin/             bridge-start, bridge-nudge, bridge-watch, bridge-phase,
+                 bridge-doctor, bridge-ps, bridge-logs
 lib/             shared Bash helpers
-templates/       handoff, implementer, and reviewer prompts
+templates/       handoff, implementer, reviewer, plan-reviewer, context-maintainer prompts
+docs/            commands.md, phase-orchestration.md
 scripts/         installer
 config.example.toml
 AGENTS.md
@@ -655,9 +413,10 @@ README.md
 
 ## Roadmap
 
-- First-class phase orchestration
-- Planner prompt and phase-plan template
-- Kiro CLI profile using Claude Opus for implementation
+- `bridge phase correct` — mid-loop agent correction with stale-state evidence packet
+- Evidence ledger (`.bridge/runs/<id>/evidence.log`) for verified smoke/test results
+- `bridge ps --watch` — live multi-PR status view
+- `bridge attach --pr N` — open the active tmux pane for a run
 - More end-to-end GitHub PR smoke tests
 
 ## License
