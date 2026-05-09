@@ -313,6 +313,19 @@ bridge_now_iso() {
   date -u +"%Y-%m-%dT%H:%M:%SZ"
 }
 
+# ---------- run journal ------------------------------------------------------
+# Appends a line to .bridge/runs/<run-id>/journal.log.
+# Format: <iso-timestamp> <event> [key=value ...]
+# Safe to call even when run_id is empty (no-op).
+
+bridge_journal_append() {
+  local run_id="$1"; shift
+  [ -n "$run_id" ] || return 0
+  local dir=".bridge/runs/$run_id"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  printf "%s %s\n" "$(bridge_now_iso)" "$*" >> "$dir/journal.log" 2>/dev/null || true
+}
+
 # ---------- orchestration helpers -------------------------------------------
 
 bridge_orchestration_present() {

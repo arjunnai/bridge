@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# bridge-logs — replay the journal for a bridge run.
+set -eu
+
+_BRIDGE_BIN_DIR=$(cd "$(dirname "$0")" && pwd)
+if [ -L "$0" ]; then
+  _real=$(readlink "$0")
+  case "$_real" in
+    /*) ;;
+    *) _real="$_BRIDGE_BIN_DIR/$_real" ;;
+  esac
+  _BRIDGE_BIN_DIR=$(cd "$(dirname "$_real")" && pwd)
+fi
+_BRIDGE_LIB_DIR="$_BRIDGE_BIN_DIR/../lib"
+# shellcheck source=lib/bridge-common.sh disable=SC1091
+. "$_BRIDGE_LIB_DIR/bridge-common.sh"
+
+usage() {
+  cat <<EOF
+usage: bridge logs [--run-id ID | --pr NUMBER | --last] [options]
+
+Replay the run journal from .bridge/runs/<run-id>/journal.log.
+
+Selection (pick one; default: --last):
+  --run-id ID    explicit run ID
+  --pr NUMBER    infer run ID from PR markers via GitHub API
+  --last         use run ID from .bridge/last-run (default)
+
+Options:
+  --repo OWNER/REPO  repo override (needed for --pr)
+  --tail N           show only last N lines
+  -h, --help         show this help
+EOF
+}
+
+run_id=""
+pr=""
+repo=""
+tail_n=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)  usage; exit 0 ;;
+    --run-id)   run_id="${2:?--run-id requires value}"; shift 2 ;;
+    --pr)       pr="${2:?--pr requires value}"; shift 2 ;;
+    --last)     shift ;;
+    --repo)     repo="${2:?--repo requires value}"; shift 2 ;;
+    --tail)     tail_n="${2:?--tail requires value}"; shift 2 ;;
+    --) shift; break ;;
+    -*) die "unknown flag: $1 (try --help)" ;;
+    *) die "unexpected argument: $1" ;;
+  esac
+done
+
+bridge_load
+
+# Resolve run_id from --pr via GitHub API.
+if [ -z "$run_id" ] && [ -n "$pr" ]; then
+  require_cmd gh
+  require_cmd jq
+  [ -n "$repo" ] || repo=$(bridge_resolve_repo) || die "could not resolve GitHub repo (use --repo)"
+  body=$(gh api "repos/$repo/pulls/$pr" --jq '.body // ""' 2>/dev/null || printf "")
+  comments=$(gh api "repos/$repo/issues/$pr/comments" --paginate 2>/dev/null || printf "[]")
+  combined=$(printf '%s\n' "$body"; printf "%s" "$comments" | jq -r '.[].body // "" | .')
+  discovered=$(printf "%s\n" "$combined" | awk '
+    /^[[:space:]]*BRIDGE_RUN_ID:[[:space:]]+[^[:space:]]/ {
+      v = $0
+      sub(/^[[:space:]]*BRIDGE_RUN_ID:[[:space:]]+/, "", v)
+      sub(/[[:space:]]+$/, "", v)
+      print v
+    }
+  ' | sort -u)
+  count=$(printf "%s\n" "$discovered" | awk 'NF { c++ } END { print c + 0 }')
+  case "$count" in
+    0) die "no BRIDGE_RUN_ID markers found on PR #$pr" ;;
+    1) run_id=$(printf "%s\n" "$discovered" | awk 'NF { print; exit }') ;;
+    *) die "multiple BRIDGE_RUN_ID markers on PR #$pr; pass --run-id explicitly:
+$discovered" ;;
+  esac
+fi
+
+# Default: read from .bridge/last-run.
+if [ -z "$run_id" ]; then
+  if [ -f ".bridge/last-run" ]; then
+    run_id=$(cat ".bridge/last-run")
+    run_id=$(_bridge_trim "$run_id")
+  fi
+fi
+
+[ -n "$run_id" ] || die "no run ID found — pass --run-id ID, --pr NUMBER, or --last (requires a prior 'bridge phase run')"
+
+log_file=".bridge/runs/$run_id/journal.log"
+[ -f "$log_file" ] || die "no journal found for run $run_id (looked in $log_file)"
+
+log_info "journal: $log_file"
+if [ -n "$tail_n" ]; then
+  tail -n "$tail_n" "$log_file"
+else
+  cat "$log_file"
+fi

@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# bridge-ps — list active bridge runs across open PRs.
+set -eu
+
+_BRIDGE_BIN_DIR=$(cd "$(dirname "$0")" && pwd)
+if [ -L "$0" ]; then
+  _real=$(readlink "$0")
+  case "$_real" in
+    /*) ;;
+    *) _real="$_BRIDGE_BIN_DIR/$_real" ;;
+  esac
+  _BRIDGE_BIN_DIR=$(cd "$(dirname "$_real")" && pwd)
+fi
+_BRIDGE_LIB_DIR="$_BRIDGE_BIN_DIR/../lib"
+# shellcheck source=lib/bridge-common.sh disable=SC1091
+. "$_BRIDGE_LIB_DIR/bridge-common.sh"
+
+usage() {
+  cat <<EOF
+usage: bridge ps [options]
+
+Lists active bridge runs across open GitHub PRs by scanning PR bodies and
+issue comments for BRIDGE_RUN_ID / BRIDGE_STATUS markers.
+
+Options:
+  --repo OWNER/REPO   repo override
+  --all               include closed PRs (slower)
+  --json              output as JSON array
+  -h, --help          show this help
+EOF
+}
+
+repo=""
+include_closed=0
+json_out=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --repo)    repo="${2:?--repo requires value}"; shift 2 ;;
+    --all)     include_closed=1; shift ;;
+    --json)    json_out=1; shift ;;
+    --) shift; break ;;
+    -*) die "unknown flag: $1 (try --help)" ;;
+    *) die "unexpected argument: $1" ;;
+  esac
+done
+
+bridge_load
+require_cmd gh
+require_cmd jq
+
+[ -n "$repo" ] || repo=$(bridge_resolve_repo) || die "could not resolve GitHub repo (use --repo or set BRIDGE_REPO)"
+
+if [ "$include_closed" -eq 1 ]; then
+  pr_state="all"
+else
+  pr_state="open"
+fi
+
+prs=$(gh pr list --repo "$repo" --state "$pr_state" --limit 100 --json number,title,headRefName,updatedAt 2>/dev/null || printf "[]")
+pr_count=$(printf "%s" "$prs" | jq 'length')
+
+if [ "$pr_count" -eq 0 ]; then
+  if [ "$json_out" -eq 1 ]; then printf "[]\n"; else log_info "no open PRs found in $repo"; fi
+  exit 0
+fi
+
+# shellcheck disable=SC2016
+_marker_extract_jq='
+def marker_values($name):
+  ((. // "") | split("\n") | map(sub("\r$"; "")))
+  | map(select(test("^[[:space:]]*" + $name + ":[[:space:]]+[^[:space:]]+[[:space:]]*$")))
+  | map(sub("^[[:space:]]*" + $name + ":[[:space:]]+"; "") | sub("[[:space:]]+$"; ""));
+'
+
+# For each PR, fetch body + issue comments and extract run/status markers.
+# Outputs: pr\trun_id\tstatus\tupdated_at\ttitle
+_scan_pr() {
+  local pr_num="$1" pr_title="$2" pr_updated="$3"
+
+  local body
+  body=$(gh api "repos/$repo/pulls/$pr_num" --jq '.body // ""' 2>/dev/null || printf "")
+
+  local comments
+  comments=$(gh api "repos/$repo/issues/$pr_num/comments" --paginate 2>/dev/null || printf "[]")
+
+  # Combine body + comment bodies into one stream and extract markers.
+  local combined
+  combined=$(printf '%s\n' "$body"; printf "%s" "$comments" | jq -r '.[].body // "" | .')
+
+  # Find the last BRIDGE_RUN_ID and BRIDGE_STATUS in combined text.
+  local run_ids statuses last_status
+  run_ids=$(printf "%s\n" "$combined" | awk '
+    /^[[:space:]]*BRIDGE_RUN_ID:[[:space:]]+[^[:space:]]/ {
+      v = $0
+      sub(/^[[:space:]]*BRIDGE_RUN_ID:[[:space:]]+/, "", v)
+      sub(/[[:space:]]+$/, "", v)
+      print v
+    }
+  ' | sort -u)
+
+  [ -n "$run_ids" ] || return 0
+
+  statuses=$(printf "%s\n" "$combined" | awk '
+    /^[[:space:]]*BRIDGE_STATUS:[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*$/ {
+      v = $0
+      sub(/^[[:space:]]*BRIDGE_STATUS:[[:space:]]+/, "", v)
+      sub(/[[:space:]]+$/, "", v)
+      print v
+    }
+  ')
+  last_status=$(printf "%s\n" "$statuses" | tail -1)
+  [ -n "$last_status" ] || last_status="unknown"
+
+  # Each unique run_id in this PR gets a row.
+  while IFS= read -r rid; do
+    [ -n "$rid" ] || continue
+    printf "%s\t%s\t%s\t%s\t%s\n" "$pr_num" "$rid" "$last_status" "$pr_updated" "$pr_title"
+  done <<EOF
+$run_ids
+EOF
+}
+
+rows=""
+pr_numbers=$(printf "%s" "$prs" | jq -r '.[] | [.number, .title, .updatedAt] | @tsv')
+
+while IFS=$(printf '\t') read -r pr_num pr_title pr_updated; do
+  [ -n "$pr_num" ] || continue
+  row=$(_scan_pr "$pr_num" "$pr_title" "$pr_updated")
+  [ -n "$row" ] || continue
+  rows="${rows:+$rows
+}$row"
+done <<EOF
+$pr_numbers
+EOF
+
+if [ -z "$rows" ]; then
+  if [ "$json_out" -eq 1 ]; then printf "[]\n"; else log_info "no bridge runs found in $repo"; fi
+  exit 0
+fi
+
+if [ "$json_out" -eq 1 ]; then
+  printf "%s\n" "$rows" | awk -F'\t' '
+    BEGIN { printf "[" }
+    NR > 1 { printf "," }
+    {
+      # Minimal JSON escaping for title
+      title = $5
+      gsub(/"/, "\\\"", title)
+      printf "{\"pr\":%s,\"run_id\":\"%s\",\"status\":\"%s\",\"updated_at\":\"%s\",\"title\":\"%s\"}", $1, $2, $3, $4, title
+    }
+    END { printf "]\n" }
+  '
+  exit 0
+fi
+
+# Pretty table output.
+# Compute relative time from updated_at.
+_rel_time() {
+  local iso="$1"
+  local epoch now diff
+  epoch=$(bridge_iso_to_epoch "$iso" 2>/dev/null || echo 0)
+  now=$(date -u +%s)
+  diff=$(( now - epoch ))
+  if   [ "$diff" -lt 60 ];    then printf "%ds ago" "$diff"
+  elif [ "$diff" -lt 3600 ];  then printf "%dm ago" "$(( diff / 60 ))"
+  elif [ "$diff" -lt 86400 ]; then printf "%dh ago" "$(( diff / 3600 ))"
+  else                              printf "%dd ago" "$(( diff / 86400 ))"
+  fi
+}
+
+printf "%-6s %-32s %-28s %-7s\n" "PR" "RUN_ID" "STATUS" "UPDATED"
+printf "%-6s %-32s %-28s %-7s\n" "------" "--------------------------------" "----------------------------" "-------"
+while IFS=$(printf '\t') read -r pr_num rid status pr_updated _pr_title; do
+  [ -n "$pr_num" ] || continue
+  rel=$(_rel_time "$pr_updated")
+  printf "%-6s %-32s %-28s %-7s\n" "#$pr_num" "$rid" "$status" "$rel"
+done <<EOF
+$rows
+EOF

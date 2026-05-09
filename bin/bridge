@@ -22,14 +22,19 @@ Commands:
   watch    Wait for explicit BRIDGE_STATUS markers on a PR.
   phase    Drive or resume phase plan/implement/review loops.
   doctor   Diagnose local tools, config, repo, and sessions.
+  ps       List active bridge runs across open PRs.
+  logs     Replay the run journal for a bridge run.
 
 Examples:
   bridge doctor
   bridge start
-  bridge phase plan "Plan phase 0"
+  bridge phase run --task "Phase 0: inspect live DB prerequisites"
   bridge phase resume --pr 42
   bridge nudge claude "Implement X"
   bridge watch 42 --status approved
+  bridge ps
+  bridge logs --last
+  bridge logs --pr 42
 
 Legacy command names still work:
   bridge-start, bridge-nudge, bridge-watch, bridge-doctor
@@ -42,7 +47,7 @@ case "$cmd" in
     usage
     exit 0
     ;;
-  start|nudge|watch|phase|doctor)
+  start|nudge|watch|phase|doctor|ps|logs)
     shift
     exec "$_BRIDGE_BIN_DIR/bridge-$cmd" "$@"
     ;;

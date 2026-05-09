@@ -43,7 +43,7 @@ else
   targets="$BRIDGE_AGENTS"
 fi
 
-[ -n "$targets" ] || die "no agents to start"
+[ -n "$targets" ] || die "no agents to start — copy the example config: cp config.example.toml config.toml, then edit [agents.*] sections"
 
 started=0
 already=0
