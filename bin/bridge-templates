@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# bridge-templates — list and show bridge prompt templates.
+set -eu
+
+_BRIDGE_BIN_DIR=$(cd "$(dirname "$0")" && pwd)
+if [ -L "$0" ]; then
+  _real=$(readlink "$0")
+  case "$_real" in
+    /*) ;;
+    *) _real="$_BRIDGE_BIN_DIR/$_real" ;;
+  esac
+  _BRIDGE_BIN_DIR=$(cd "$(dirname "$_real")" && pwd)
+fi
+_BRIDGE_TEMPLATE_DIR="$_BRIDGE_BIN_DIR/../templates"
+
+usage() {
+  cat <<EOF
+usage: bridge-templates list
+       bridge-templates show <name>
+
+Manage bridge prompt templates.
+
+Subcommands:
+  list         Print all available template names and their paths.
+  show <name>  Print the contents of a template.
+               <name> may be a full filename (e.g. implementer-prompt.md)
+               or a short alias (e.g. implementer).
+
+Available short aliases:
+  orchestrator -> orchestrator-prompt.md
+  implementer  -> implementer-prompt.md
+  reviewer     -> reviewer-prompt.md
+  plan-review  -> plan-reviewer-prompt.md
+  context      -> context-maintainer-prompt.md
+  validator    -> validator-prompt.md
+  handoff      -> handoff.md
+  plan         -> phase-plan.md
+
+Options:
+  -h, --help   show this help
+EOF
+}
+
+_resolve_template() {
+  name="$1"
+  # Full filename match.
+  if [ -f "$_BRIDGE_TEMPLATE_DIR/$name" ]; then
+    printf "%s/%s" "$_BRIDGE_TEMPLATE_DIR" "$name"
+    return
+  fi
+  # Short alias resolution.
+  case "$name" in
+    orchestrator)  printf "%s/orchestrator-prompt.md"      "$_BRIDGE_TEMPLATE_DIR" ;;
+    implementer)   printf "%s/implementer-prompt.md"       "$_BRIDGE_TEMPLATE_DIR" ;;
+    reviewer)      printf "%s/reviewer-prompt.md"          "$_BRIDGE_TEMPLATE_DIR" ;;
+    plan-review)   printf "%s/plan-reviewer-prompt.md"     "$_BRIDGE_TEMPLATE_DIR" ;;
+    context)       printf "%s/context-maintainer-prompt.md" "$_BRIDGE_TEMPLATE_DIR" ;;
+    validator)     printf "%s/validator-prompt.md"          "$_BRIDGE_TEMPLATE_DIR" ;;
+    handoff)       printf "%s/handoff.md"                   "$_BRIDGE_TEMPLATE_DIR" ;;
+    plan)          printf "%s/phase-plan.md"                "$_BRIDGE_TEMPLATE_DIR" ;;
+    *)
+      printf "unknown template: %s\ntry 'bridge templates list'\n" "$name" >&2
+      exit 1
+      ;;
+  esac
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  -h|--help|'') usage; exit 0 ;;
+  list)
+    [ -d "$_BRIDGE_TEMPLATE_DIR" ] || { printf "templates directory not found: %s\n" "$_BRIDGE_TEMPLATE_DIR" >&2; exit 1; }
+    for f in "$_BRIDGE_TEMPLATE_DIR"/*.md; do
+      [ -f "$f" ] || continue
+      name=$(basename "$f")
+      size=$(wc -c < "$f" | tr -d ' ')
+      printf "  %-40s  %s  %s bytes\n" "$name" "$f" "$size"
+    done
+    ;;
+  show)
+    [ -n "${2:-}" ] || { usage >&2; exit 2; }
+    path=$(_resolve_template "$2")
+    [ -f "$path" ] || { printf "template not found: %s\n" "$path" >&2; exit 1; }
+    cat "$path"
+    ;;
+  *)
+    printf "unknown subcommand: %s\n" "$cmd" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

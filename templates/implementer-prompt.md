@@ -9,6 +9,21 @@ PHASE_PLAN_FILE: {{PHASE_PLAN_FILE}}
 EXPECTED_OUTPUT: A pushed branch and an open or updated PR with a status marker.
 STATUS_MARKER: BRIDGE_STATUS: implementation_ready  OR  BRIDGE_STATUS: fixes_pushed
 
+---
+STALE-CONTEXT WARNING
+
+Your pane history and older PR comments may be stale. The bridge handoff
+above (BRIDGE_RUN_ID, SOURCE_AGENT, TASK) is the newest signal and overrides
+any prior assumptions from your session history.
+
+- If the handoff includes a LATEST_OBSERVED_AT block, treat it as current truth.
+- Do not claim a dependency is missing if live command output shows it exists.
+- Do not post BRIDGE_STATUS until you have re-read the current PR state and
+  verified your claim against actual files or command output — not old comments.
+- If you see a BRIDGE_CORRECTION block, acknowledge it with "ACK CORRECTION"
+  before taking any other action.
+---
+
 You are the implementer for {{REPO}}.
 
 Kiro must not plan. If {{PHASE_PLAN_FILE}} is missing, stop immediately and

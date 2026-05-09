@@ -40,6 +40,7 @@ Commands:
   plan-fix          Nudge orchestrator to revise plan after review feedback.
   review-plan-file  Plan-review/fix loop on an existing plan file; stops at plan_approved.
   plan-edit         Open the phase plan file in \$EDITOR.
+  correct           Send a high-priority correction packet to an agent mid-loop.
   implement         Nudge implementer to execute the phase plan.
   review            Nudge reviewer for adversarial code review.
   context           Nudge context_maintainer to update durable docs.
@@ -267,6 +268,27 @@ Options:
 EOF
 }
 
+usage_correct() {
+  cat <<EOF
+usage: bridge phase correct --pr NUMBER --run-id ID --agent AGENT [options]
+
+Interrupt an agent's current reasoning with a high-priority correction packet.
+The agent must reply with "ACK CORRECTION" before taking further action.
+
+Required:
+  --pr NUMBER
+  --run-id ID
+  --agent AGENT         agent to correct (the one currently active)
+
+Options:
+  --message TEXT        correction message / current blocker description
+  --invalid TEXT        prior assumption to invalidate
+  --required-action TEXT what the agent must do next
+  --repo OWNER/REPO
+  --source-agent AGENT  (default: codex)
+EOF
+}
+
 usage_plan_edit() {
   cat <<EOF
 usage: bridge phase plan-edit [--pr NUMBER] [--plan-file PATH]
@@ -290,6 +312,7 @@ case "$cmd" in
   plan-review)        shift; case "${1:-}" in -h|--help) usage_plan_review;      exit 0 ;; esac ;;
   plan-fix)           shift; case "${1:-}" in -h|--help) usage_plan_fix;         exit 0 ;; esac ;;
   review-plan-file)   shift; case "${1:-}" in -h|--help) usage_review_plan_file; exit 0 ;; esac ;;
+  correct)            shift; case "${1:-}" in -h|--help) usage_correct;          exit 0 ;; esac ;;
   plan-edit)          shift; case "${1:-}" in -h|--help) usage_plan_edit;        exit 0 ;; esac ;;
   implement)          shift; case "${1:-}" in -h|--help) usage_implement;        exit 0 ;; esac ;;
   review)             shift; case "${1:-}" in -h|--help) usage_review;           exit 0 ;; esac ;;
@@ -320,6 +343,7 @@ dry_run=0
 merge_method="squash"
 plan_file=""
 fixer_agent=""
+evidence_file=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -339,6 +363,7 @@ while [ $# -gt 0 ]; do
     --review-plan)  review_plan=1; shift ;;
     --plan-file)    plan_file="${2:?--plan-file requires value}"; shift 2 ;;
     --fixer)        fixer_agent="${2:?--fixer requires value}"; shift 2 ;;
+    --evidence-file) evidence_file="${2:?--evidence-file requires value}"; shift 2 ;;
     --dry-run)      dry_run=1; shift ;;
     --merge)        auto_merge=1; merge_requested=1; shift ;;
     --no-merge)     auto_merge=0; shift ;;
@@ -634,6 +659,27 @@ _run_plan_review_loop() {
     esac
   done
   die "phase exhausted plan-review cycles ($max_plan_cycles) — hand-edit the plan file ($(bridge_phase_plan_file)) and re-run with --max-plan-cycles $((max_plan_cycles + 5))"
+}
+
+_build_evidence_packet() {
+  # Emit a compact state packet to append to implementer nudges after review failure.
+  local now pr_head latest_review
+  now=$(bridge_now_iso)
+  pr_head=""
+  latest_review=""
+  if command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && [ -n "${repo:-}" ] && [ -n "${pr:-}" ]; then
+    pr_head=$(gh api "repos/$repo/pulls/$pr" --jq '.head.sha // ""' 2>/dev/null | head -c 7 || true)
+    latest_review=$(gh api "repos/$repo/pulls/$pr/reviews" --paginate \
+      --jq 'sort_by(.submitted_at) | last | "\(.state) by \(.user.login) at \(.submitted_at)"' \
+      2>/dev/null || true)
+  fi
+  printf '%s\n' \
+    "---" \
+    "LATEST_OBSERVED_AT: $now" \
+    "${pr_head:+PR_HEAD: $pr_head}" \
+    "${latest_review:+LATEST_REVIEW_STATUS: $latest_review}" \
+    "DO_NOT_ASSUME: Treat this packet as newer than PR body, older comments, and prior session history." \
+    "---"
 }
 
 _warn_dirty_worktree() {
@@ -970,7 +1016,14 @@ case "$cmd" in
           [ "$cycle" -lt "$max_cycles" ] || die "max review cycles ($max_cycles) reached with changes_requested — pass --max-cycles $((max_cycles + 2)) to allow more fix cycles"
           log_info "phase resume: changes requested; nudging implementer for fixes"
           bridge_journal_append "$run_id" "event=nudge_implementer_fixes pr=$pr cycle=$cycle"
-          _nudge_implementer_for_resume "Address Codex review comments on PR #$pr, push fixes, and post BRIDGE_STATUS: fixes_pushed."
+          if [ "$dry_run" -eq 0 ]; then
+            _ev_tmp=$(mktemp "${TMPDIR:-/tmp}/bridge-ev-XXXXXX")
+            _build_evidence_packet > "$_ev_tmp"
+            set -- implement --repo "$repo" --pr "$pr" --run-id "$run_id" --source-agent "$source_agent" --task "Address Codex review comments on PR #$pr, push fixes, and post BRIDGE_STATUS: fixes_pushed." --evidence-file "$_ev_tmp"
+            [ -n "$implementer_agent" ] && set -- "$@" --agent "$implementer_agent"
+            "$_BRIDGE_BIN_DIR/bridge-phase" "$@"
+            rm -f "$_ev_tmp"
+          fi
           log_info "phase resume: waiting for fixes_pushed"
           fresh=$(_wait_pr_for_status_after fixes_pushed "" "$current_since")
           current_since=$(printf "%s\n" "$fresh" | awk -F '\t' '{ print $1 }')
@@ -1060,7 +1113,10 @@ case "$cmd" in
           current_since="$result_created"
           log_info "phase run: changes requested; nudging implementer for fixes"
           bridge_journal_append "$run_id" "event=nudge_implementer_fixes pr=$pr cycle=$cycle"
-          "$_BRIDGE_BIN_DIR/bridge-phase" implement --repo "$repo" --pr "$pr" --run-id "$run_id" --source-agent "$source_agent" --task "Address Codex review comments on PR #$pr, push fixes, and post BRIDGE_STATUS: fixes_pushed."
+          _ev_tmp=$(mktemp "${TMPDIR:-/tmp}/bridge-ev-XXXXXX")
+          _build_evidence_packet > "$_ev_tmp"
+          "$_BRIDGE_BIN_DIR/bridge-phase" implement --repo "$repo" --pr "$pr" --run-id "$run_id" --source-agent "$source_agent" --evidence-file "$_ev_tmp" --task "Address Codex review comments on PR #$pr, push fixes, and post BRIDGE_STATUS: fixes_pushed."
+          rm -f "$_ev_tmp"
           log_info "phase run: waiting for fixes_pushed"
           fresh=$(_wait_pr_for_status_after fixes_pushed "" "$current_since")
           current_since=$(printf "%s\n" "$fresh" | awk -F '\t' '{ print $1 }')
@@ -1188,6 +1244,7 @@ PHASE_PLAN_FILE: $plan_file"
       --role implementer \
       --run-id "$run_id"
     [ -n "$pr" ] && set -- "$@" --pr "$pr"
+    [ -n "$evidence_file" ] && set -- "$@" --evidence-file "$evidence_file"
     exec "$_BRIDGE_BIN_DIR/bridge-nudge" "$@" \
       --template "$template_dir/implementer-prompt.md" \
       --task "$task" \
@@ -1243,6 +1300,45 @@ PHASE_PLAN_FILE: $plan_file"
       *) die "unknown watch state: $state" ;;
     esac
     exec "$_BRIDGE_BIN_DIR/bridge-watch" "$@"
+    ;;
+  correct)
+    [ -n "$pr" ]     || die "phase correct requires --pr"
+    [ -n "$run_id" ] || die "phase correct requires --run-id"
+    [ -n "$agent" ]  || die "phase correct requires --agent"
+    # Parse correct-specific flags from remaining positional args.
+    corr_message=""; corr_invalid=""; corr_required=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --message)         corr_message="${2:?--message requires value}"; shift 2 ;;
+        --invalid)         corr_invalid="${2:?--invalid requires value}"; shift 2 ;;
+        --required-action) corr_required="${2:?--required-action requires value}"; shift 2 ;;
+        --) shift; break ;;
+        -*) die "unknown correct flag: $1" ;;
+        *)  [ -z "$corr_message" ] && corr_message="$1" || corr_message="$corr_message $1"; shift ;;
+      esac
+    done
+    [ -n "$corr_message" ] || die "phase correct requires --message TEXT (or positional text)"
+    corr_now=$(bridge_now_iso)
+    # Fetch latest PR head SHA for the evidence packet.
+    corr_head=""
+    if command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && [ -n "$repo" ]; then
+      corr_head=$(gh api "repos/$repo/pulls/$pr" --jq '.head.sha // ""' 2>/dev/null | head -c 7 || true)
+    fi
+    corr_packet="BRIDGE_CORRECTION: true
+BRIDGE_RUN_ID: $run_id
+PR: $pr
+LATEST_OBSERVED_AT: $corr_now${corr_head:+
+PR_HEAD: $corr_head}
+CURRENT_BLOCKER: $corr_message${corr_invalid:+
+INVALID_PRIOR_ASSUMPTION: $corr_invalid}${corr_required:+
+REQUIRED_NEXT_ACTION: $corr_required}
+ACK_REQUIRED: Reply with \"ACK CORRECTION\" before taking any further action."
+    bridge_journal_append "$run_id" "event=correction_sent pr=$pr agent=$agent blocker=$corr_message"
+    exec "$_BRIDGE_BIN_DIR/bridge-nudge" "$agent" \
+      --repo "$repo" --pr "$pr" --run-id "$run_id" \
+      --source-agent "$source_agent" \
+      --header \
+      "$corr_packet"
     ;;
   plan-edit)
     # Resolve plan file: --plan-file flag > config value > default.

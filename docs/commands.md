@@ -72,6 +72,7 @@ bridge nudge claude --template templates/implementer-prompt.md \
 | `--expected-output TEXT` | Expected output hint |
 | `--status-marker TEXT` | Required reply marker |
 | `--plan-file PATH` | Override `{{PHASE_PLAN_FILE}}` in the template |
+| `--evidence-file PATH` | Append evidence ledger content (state snapshot) to the prompt body |
 | `--no-header` | Never prepend the handoff header |
 | `--header` | Force-prepend the handoff header |
 | `--strict-template` | Fail if any `{{PLACEHOLDER}}` remains unfilled |
@@ -122,6 +123,7 @@ bridge watch 42 --run-id bridge-... --timeout 600 --poll 5
 | `--timeout SECONDS` | Overall timeout (default: 1200) |
 | `--poll SECONDS` | Poll interval (default: 10) |
 | `--quiet SECONDS` | Inline-only quiet window (default: 90) |
+| `--json` | On match, print `{"pr","run_id","status","type","author","created_at"}` to stdout |
 
 **Channels:**
 
@@ -276,6 +278,28 @@ Nudge the context maintainer to update durable docs (manual / debug).
 bridge phase context --pr 42 --run-id bridge-...
 ```
 
+### `bridge phase correct`
+
+Send a mid-loop correction to an agent with a `BRIDGE_CORRECTION` packet. Use when an agent is blocked by a stale assumption (wrong file path, incorrect dependency claim, already-fixed issue) and needs explicit evidence before it can continue.
+
+```bash
+bridge phase correct --pr 42 --run-id bridge-... --agent kiro \
+  --message "The migrations directory is db/migrations/, not migrations/" \
+  --invalid "Assumed migrations/ exists at repo root" \
+  --required-action "Re-run ls db/migrations/ and continue implementation"
+```
+
+The correction packet is prepended with the current PR head SHA and a `LATEST_OBSERVED_AT` timestamp, and the agent is required to acknowledge with `ACK CORRECTION` before taking any further action.
+
+| Flag | Meaning |
+| --- | --- |
+| `--pr NUMBER` | PR to correct (required) |
+| `--run-id ID` | Run ID (required) |
+| `--agent AGENT` | Agent to send the correction to (required) |
+| `--message TEXT` | Description of the blocker (required; positional text accepted) |
+| `--invalid TEXT` | The stale assumption to invalidate |
+| `--required-action TEXT` | Explicit next step the agent must take |
+
 ### `bridge phase watch`
 
 Wait for a phase marker.
@@ -359,3 +383,34 @@ The journal records every nudge and state transition with a UTC timestamp.
 | `--last` | Use `.bridge/last-run` (default) |
 | `--repo OWNER/REPO` | Repo override (needed for `--pr`) |
 | `--tail N` | Show only last N lines |
+
+---
+
+## `bridge skills`
+
+Show bridge skill files and their sync status across all detected agent homes.
+
+```bash
+bridge skills
+```
+
+For each bundled skill (Claude Code `bridge`, Codex `bridge-phase`), prints whether it is installed and in sync in every detected `~/.claude*` and `~/.codex*` home. Stale entries suggest `scripts/install.sh --force`.
+
+---
+
+## `bridge templates`
+
+List and show bridge prompt templates.
+
+```bash
+bridge templates list
+bridge templates show implementer
+bridge templates show reviewer-prompt.md
+```
+
+| Subcommand | Meaning |
+| --- | --- |
+| `list` | Print all template names and file sizes |
+| `show <name>` | Print the contents of a template |
+
+Short aliases for `show`: `orchestrator`, `implementer`, `reviewer`, `plan-review`, `context`, `validator`, `handoff`, `plan`.

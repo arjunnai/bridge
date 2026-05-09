@@ -38,6 +38,7 @@ Options:
   --expected-output TEXT    expected output for header / template
   --status-marker TEXT      required reply marker for header / template
   --plan-file PATH          override the rendered PHASE_PLAN_FILE for this nudge
+  --evidence-file PATH      append evidence ledger content to the prompt body
   --header                  force-prepend the handoff header
   --no-header               never prepend the handoff header
   --strict-template         fail if template still has unfilled {{PLACEHOLDERS}}
@@ -65,6 +66,7 @@ task=""
 expected=""
 status_marker=""
 plan_file_override=""
+evidence_file=""
 header_mode="auto"
 strict=0
 session_override=""
@@ -83,6 +85,7 @@ while [ $# -gt 0 ]; do
     --expected-output) expected="${2:?--expected-output requires value}"; shift 2 ;;
     --status-marker)   status_marker="${2:?--status-marker requires value}"; shift 2 ;;
     --plan-file)       plan_file_override="${2:?--plan-file requires value}"; shift 2 ;;
+    --evidence-file)   evidence_file="${2:?--evidence-file requires value}"; shift 2 ;;
     --session)         session_override="${2:?--session requires value}"; shift 2 ;;
     --header)          header_mode="force"; shift ;;
     --no-header)       header_mode="off"; shift ;;
@@ -176,6 +179,13 @@ if [ "$strict" -eq 1 ]; then
   case "$prompt" in
     *'{{'*'}}'*) die "template has unfilled placeholder(s); use --strict-template off or fill them" ;;
   esac
+fi
+
+# Append evidence file content if provided.
+if [ -n "$evidence_file" ]; then
+  [ -f "$evidence_file" ] || die "evidence file not found: $evidence_file"
+  evidence_content=$(cat "$evidence_file")
+  prompt="${prompt}"$'\n\n'"---"$'\n'"EVIDENCE_LEDGER: $evidence_file"$'\n'"${evidence_content}"$'\n'"---"
 fi
 
 # Header decision. Detect a real marker line of the form:

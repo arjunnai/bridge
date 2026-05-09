@@ -125,6 +125,58 @@ else
   warn "bridge not found in PATH — skills and tab-completion won't work (add install dir to PATH)"
 fi
 
+# Skill sync check.
+_skill_md5() {
+  if command -v md5sum >/dev/null 2>&1; then
+    md5sum "$1" | awk '{ print $1 }'
+  elif command -v md5 >/dev/null 2>&1; then
+    md5 -q "$1"
+  else
+    printf "?"
+  fi
+}
+_src_root="$_BRIDGE_BIN_DIR/.."
+for _agent_label in claude codex; do
+  case "$_agent_label" in
+    claude) _home_glob=".claude*" ;;
+    codex)  _home_glob=".codex*" ;;
+  esac
+  _skills_src="$_src_root/.$_agent_label/skills"
+  [ -d "$_skills_src" ] || continue
+  _homes=""
+  if [ -d "$HOME" ]; then
+    while IFS= read -r _d; do
+      _homes="${_homes}${_homes:+
+}$_d"
+    done <<EOF
+$(find "$HOME" -maxdepth 1 -type d -name "$_home_glob" -print 2>/dev/null | sort)
+EOF
+  fi
+  [ -n "$_homes" ] || continue
+  for _skill_src in "$_skills_src"/*/; do
+    [ -d "$_skill_src" ] || continue
+    _skill_name=$(basename "$_skill_src")
+    _src_skill="$_skill_src/SKILL.md"
+    [ -f "$_src_skill" ] || continue
+    _src_hash=$(_skill_md5 "$_src_skill")
+    while IFS= read -r _home; do
+      [ -n "$_home" ] || continue
+      _dst_skill="$_home/skills/$_skill_name/SKILL.md"
+      if [ ! -f "$_dst_skill" ]; then
+        warn "skill $_agent_label/$_skill_name: not installed in $_home (run scripts/install.sh)"
+      elif [ "$_src_hash" = "?" ]; then
+        log_info "skill $_agent_label/$_skill_name: present in $_home (checksum tool unavailable)"
+      elif [ "$(_skill_md5 "$_dst_skill")" != "$_src_hash" ]; then
+        warn "skill $_agent_label/$_skill_name: STALE in $_home (run scripts/install.sh --force)"
+      else
+        ok "skill $_agent_label/$_skill_name: in sync in $_home"
+      fi
+    done <<EOF
+$_homes
+EOF
+  done
+done
+
 # Watch timing.
 log_info "watch: timeout=${BRIDGE_WATCH_TIMEOUT}s poll=${BRIDGE_WATCH_POLL}s quiet=${BRIDGE_WATCH_QUIET}s"
 

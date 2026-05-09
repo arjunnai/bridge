@@ -2,10 +2,10 @@
   <img src="assets/bridge-banner.jpg" alt="bridge" width="100%">
 </p>
 
-<h1 align="center">Local agents. Durable PR state.</h1>
+<h1 align="center">No agent reviews its own code.</h1>
 
 <p align="center">
-  <strong>Coordinate Codex, Claude, Kiro, and other local coding agents through tmux and GitHub.</strong>
+  <strong>bridge keeps Codex, Claude, and Kiro honest — separate sessions, GitHub as the source of truth, adversarial review by default.</strong>
 </p>
 
 <p align="center">
@@ -223,6 +223,8 @@ validator workflows.
 | `bridge phase` | Drive or resume the full plan → review → implement → approve lifecycle. |
 | `bridge ps` | List active bridge runs across open PRs; `--watch` polls for changes. |
 | `bridge logs` | Replay the run journal for a bridge run (`--last`, `--pr`, `--run-id`). |
+| `bridge skills` | Show installed skill files and sync status across agent homes. |
+| `bridge templates` | List or show prompt templates (`list`, `show <name>`). |
 
 **→ [Full command reference](docs/commands.md)** — all flags, options, and template placeholders.
 
@@ -239,12 +241,17 @@ bridge phase resume --pr 42
 bridge phase resume --pr 42 --dry-run              # inspect state only
 bridge phase plan-edit --pr 42                     # hand-edit plan
 bridge phase review-plan-file --pr 42 --plan-file docs/plan.md
+bridge phase correct --pr 42 --run-id bridge-... --agent kiro --message "fix assumption"
 bridge nudge claude "Do X" --dry-run               # preview prompt
 bridge ps                                          # what runs are alive?
 bridge ps --watch                                  # live status changes
 bridge logs                                        # replay last run journal
 bridge logs --pr 42
 bridge watch 42 --status approved
+bridge watch 42 --status approved --json           # machine-readable output
+bridge skills                                      # check skill install status
+bridge templates list
+bridge templates show implementer
 ```
 
 ---

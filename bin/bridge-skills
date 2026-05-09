@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# bridge-skills — list installed bridge skill files and check sync across agent homes.
+set -eu
+
+_BRIDGE_BIN_DIR=$(cd "$(dirname "$0")" && pwd)
+if [ -L "$0" ]; then
+  _real=$(readlink "$0")
+  case "$_real" in
+    /*) ;;
+    *) _real="$_BRIDGE_BIN_DIR/$_real" ;;
+  esac
+  _BRIDGE_BIN_DIR=$(cd "$(dirname "$_real")" && pwd)
+fi
+_BRIDGE_SRC_DIR="$_BRIDGE_BIN_DIR/.."
+
+usage() {
+  cat <<EOF
+usage: bridge-skills [options]
+
+Show bridge skill files and their installation status across all detected
+agent homes (~/.claude* and ~/.codex*).
+
+For each bundled skill, prints:
+  - source checksum
+  - installed homes (with OK / MISSING / STALE status per home)
+
+Options:
+  -h, --help   show this help
+EOF
+}
+
+[ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ] && { usage; exit 0; }
+
+_md5() {
+  if command -v md5sum >/dev/null 2>&1; then
+    md5sum "$1" | awk '{ print $1 }'
+  elif command -v md5 >/dev/null 2>&1; then
+    md5 -q "$1"
+  else
+    printf "?"
+  fi
+}
+
+_check_skill_in_home() {
+  skill_src_dir="$1"
+  skill_name="$2"
+  home_dir="$3"
+  dest="$home_dir/skills/$skill_name/SKILL.md"
+  src="$skill_src_dir/SKILL.md"
+  if [ ! -f "$dest" ]; then
+    printf "  MISSING  %s\n" "$home_dir"
+    return
+  fi
+  if ! command -v md5 >/dev/null 2>&1 && ! command -v md5sum >/dev/null 2>&1; then
+    printf "  PRESENT  %s  (checksum tool not available)\n" "$home_dir"
+    return
+  fi
+  src_hash=$(_md5 "$src")
+  dst_hash=$(_md5 "$dest")
+  if [ "$src_hash" = "$dst_hash" ]; then
+    printf "  OK       %s\n" "$home_dir"
+  else
+    printf "  STALE    %s  (re-run scripts/install.sh --force to update)\n" "$home_dir"
+  fi
+}
+
+_scan_agent_type() {
+  label="$1"      # "claude" or "codex"
+  glob="$2"       # ".claude*" or ".codex*"
+  skill_root="$3" # path to bundled skills dir
+
+  [ -d "$skill_root" ] || return 0
+
+  homes=""
+  if [ -d "$HOME" ]; then
+    while IFS= read -r d; do
+      homes="${homes}${homes:+
+}$d"
+    done <<EOF
+$(find "$HOME" -maxdepth 1 -type d -name "$glob" -print 2>/dev/null | sort)
+EOF
+  fi
+
+  for skill_src in "$skill_root"/*/; do
+    [ -d "$skill_src" ] || continue
+    skill_name=$(basename "$skill_src")
+    src_skill_md="$skill_src/SKILL.md"
+    [ -f "$src_skill_md" ] || continue
+    printf "\n[%s] %s\n" "$label" "$skill_name"
+    printf "  source: %s\n" "$src_skill_md"
+    if [ -z "$homes" ]; then
+      printf "  (no %s homes detected)\n" "$label"
+    else
+      while IFS= read -r home_dir; do
+        [ -n "$home_dir" ] || continue
+        _check_skill_in_home "$skill_src" "$skill_name" "$home_dir"
+      done <<EOF
+$homes
+EOF
+    fi
+  done
+}
+
+_scan_agent_type "claude" ".claude*" "$_BRIDGE_SRC_DIR/.claude/skills"
+_scan_agent_type "codex"  ".codex*"  "$_BRIDGE_SRC_DIR/.codex/skills"
+printf "\n"
+printf "To reinstall: scripts/install.sh --force\n"
+printf "To add a home: scripts/install.sh --claude-home ~/.claude-work\n"

@@ -58,12 +58,13 @@ Options:
   --timeout SECONDS     overall timeout (default: \$BRIDGE_WATCH_TIMEOUT or 1200)
   --poll SECONDS        poll interval (default: \$BRIDGE_WATCH_POLL or 10)
   --quiet SECONDS       inline-only quiet window (default: \$BRIDGE_WATCH_QUIET or 90)
+  --json                on match, print JSON object {pr,run_id,status,author,created_at,body}
   -h, --help            show this help
 EOF
 }
 
 pr=""; repo=""; agent=""; author=""; run_id=""; status=""; phase_status=""
-timeout=""; poll=""; quiet=""
+timeout=""; poll=""; quiet=""; json_out=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -77,6 +78,7 @@ while [ $# -gt 0 ]; do
     --timeout)       timeout="${2:?--timeout requires value}"; shift 2 ;;
     --poll)          poll="${2:?--poll requires value}"; shift 2 ;;
     --quiet)         quiet="${2:?--quiet requires value}"; shift 2 ;;
+    --json)          json_out=1; shift ;;
     --) shift; break ;;
     -*) die "unknown flag: $1 (try --help)" ;;
     *)
@@ -333,6 +335,15 @@ _fetch() {
 
 last_inline_match_epoch=0
 
+_match_json_exit() {
+  # _match_json_exit <type> <author> <created_at>
+  if [ "$json_out" -eq 1 ]; then
+    printf '{"pr":"%s","run_id":"%s","status":"%s","type":"%s","author":"%s","created_at":"%s"}\n' \
+      "$pr" "$run_id" "$status" "$1" "$2" "$3"
+  fi
+  exit 0
+}
+
 while :; do
   now=$(date -u +%s)
   if [ "$now" -ge "$deadline" ]; then
@@ -352,7 +363,7 @@ while :; do
         if [ -z "$author" ] || [ "$pr_user" = "$author" ]; then
           if _body_matches "$pr_body"; then
             log_ok "PR body match (author=$pr_user updated=$pr_updated)"
-            exit 0
+            _match_json_exit "pr_body" "$pr_user" "$pr_updated"
           fi
         fi
       fi
@@ -376,7 +387,7 @@ while :; do
   ')
   if [ -n "$match" ]; then
     log_ok "issue comment match: $match"
-    exit 0
+    _match_json_exit "issue_comment" "${match%%@*}" "${match#*@}"
   fi
 
   # 3. PR reviews (require non-empty body)
@@ -397,7 +408,7 @@ while :; do
   ')
   if [ -n "$match" ]; then
     log_ok "review match: $match"
-    exit 0
+    _match_json_exit "review" "${match%%@*}" "${match#*@}"
   fi
 
   # 4. inline review comments (apply quiet window for inline-only signals)
@@ -424,7 +435,7 @@ while :; do
     elapsed=$(( now - last_inline_match_epoch ))
     if [ "$elapsed" -ge "$quiet" ]; then
       log_ok "inline comment match; quiet window ${quiet}s elapsed (last=$inline_match_iso)"
-      exit 0
+      _match_json_exit "inline_comment" "" "$inline_match_iso"
     fi
     remaining=$(( quiet - elapsed ))
     log_info "inline match seen (last=$inline_match_iso); waiting quiet window ${remaining}s"

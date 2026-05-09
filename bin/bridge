@@ -17,15 +17,17 @@ usage() {
 usage: bridge <command> [options]
 
 Commands:
-  init     Create config.toml from config.example.toml.
-  start    Start tmux sessions for one or all configured agents.
-  attach   Attach to an agent's tmux session (or infer from --pr).
-  nudge    Send a prompt to an agent session.
-  watch    Wait for explicit BRIDGE_STATUS markers on a PR.
-  phase    Drive or resume phase plan/implement/review loops.
-  doctor   Diagnose local tools, config, repo, and sessions.
-  ps       List active bridge runs across open PRs.
-  logs     Replay the run journal for a bridge run.
+  init       Create config.toml from config.example.toml.
+  start      Start tmux sessions for one or all configured agents.
+  attach     Attach to an agent's tmux session (or infer from --pr).
+  nudge      Send a prompt to an agent session.
+  watch      Wait for explicit BRIDGE_STATUS markers on a PR.
+  phase      Drive or resume phase plan/implement/review loops.
+  doctor     Diagnose local tools, config, repo, and sessions.
+  ps         List active bridge runs across open PRs.
+  logs       Replay the run journal for a bridge run.
+  skills     Show installed skill files and sync status across agent homes.
+  templates  List or show prompt templates.
 
 Examples:
   bridge init
@@ -42,6 +44,9 @@ Examples:
   bridge ps --watch
   bridge logs --last
   bridge logs --pr 42
+  bridge skills
+  bridge templates list
+  bridge templates show implementer
 
 Legacy command names still work:
   bridge-start, bridge-nudge, bridge-watch, bridge-doctor
@@ -54,7 +59,7 @@ case "$cmd" in
     usage
     exit 0
     ;;
-  init|start|attach|nudge|watch|phase|doctor|ps|logs)
+  init|start|attach|nudge|watch|phase|doctor|ps|logs|skills|templates)
     shift
     exec "$_BRIDGE_BIN_DIR/bridge-$cmd" "$@"
     ;;
