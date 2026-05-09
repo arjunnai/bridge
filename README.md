@@ -5,6 +5,10 @@
 <h1 align="center">No agent reviews its own code.</h1>
 
 <p align="center">
+  <img src="assets/asterisk.svg" alt="*" width="32" height="32">
+</p>
+
+<p align="center">
   <strong>bridge keeps Codex, Claude, and Kiro honest — separate sessions, GitHub as the source of truth, adversarial review by default.</strong>
 </p>
 
