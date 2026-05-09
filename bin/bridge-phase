@@ -39,6 +39,7 @@ Commands:
   plan-review       Nudge reviewer to adversarially review the plan.
   plan-fix          Nudge orchestrator to revise plan after review feedback.
   review-plan-file  Plan-review/fix loop on an existing plan file; stops at plan_approved.
+  plan-edit         Open the phase plan file in \$EDITOR.
   implement         Nudge implementer to execute the phase plan.
   review            Nudge reviewer for adversarial code review.
   context           Nudge context_maintainer to update durable docs.
@@ -266,6 +267,20 @@ Options:
 EOF
 }
 
+usage_plan_edit() {
+  cat <<EOF
+usage: bridge phase plan-edit [--pr NUMBER] [--plan-file PATH]
+
+Open the phase plan file in \$EDITOR. Useful after plan_changes_requested to
+hand-edit before re-submitting to the plan-review loop.
+
+Options:
+  --plan-file PATH   explicit path to plan file (default: config or BRIDGE_PHASE_PLAN.md)
+  --pr NUMBER        if given, print the plan file path from this PR's adoption comment
+  --repo OWNER/REPO
+EOF
+}
+
 cmd="${1:-}"
 case "$cmd" in
   -h|--help|'') usage; exit 0 ;;
@@ -275,6 +290,7 @@ case "$cmd" in
   plan-review)        shift; case "${1:-}" in -h|--help) usage_plan_review;      exit 0 ;; esac ;;
   plan-fix)           shift; case "${1:-}" in -h|--help) usage_plan_fix;         exit 0 ;; esac ;;
   review-plan-file)   shift; case "${1:-}" in -h|--help) usage_review_plan_file; exit 0 ;; esac ;;
+  plan-edit)          shift; case "${1:-}" in -h|--help) usage_plan_edit;        exit 0 ;; esac ;;
   implement)          shift; case "${1:-}" in -h|--help) usage_implement;        exit 0 ;; esac ;;
   review)             shift; case "${1:-}" in -h|--help) usage_review;           exit 0 ;; esac ;;
   context)            shift; case "${1:-}" in -h|--help) usage_context;          exit 0 ;; esac ;;
@@ -1227,5 +1243,31 @@ PHASE_PLAN_FILE: $plan_file"
       *) die "unknown watch state: $state" ;;
     esac
     exec "$_BRIDGE_BIN_DIR/bridge-watch" "$@"
+    ;;
+  plan-edit)
+    # Resolve plan file: --plan-file flag > config value > default.
+    edit_file="${plan_file:-$phase_file}"
+    if [ -n "$pr" ] && [ -z "$plan_file" ]; then
+      require_cmd gh
+      require_cmd jq
+      # Try to read PHASE_PLAN_FILE from the PR's adoption comment.
+      all_bodies=$(gh api "repos/$repo/issues/$pr/comments" --paginate \
+        --jq '[.[].body // ""] | .[]' 2>/dev/null || true)
+      extracted=$(printf "%s\n" "$all_bodies" | awk '
+        /^[[:space:]]*PHASE_PLAN_FILE:[[:space:]]+[^[:space:]]/ {
+          v = $0
+          sub(/^[[:space:]]*PHASE_PLAN_FILE:[[:space:]]+/, "", v)
+          sub(/[[:space:]]+$/, "", v)
+          print v; exit
+        }
+      ')
+      [ -n "$extracted" ] && edit_file="$extracted"
+    fi
+    editor="${VISUAL:-${EDITOR:-vi}}"
+    log_info "opening plan file: $edit_file (editor: $editor)"
+    if [ ! -f "$edit_file" ]; then
+      log_warn "plan file does not exist yet; $editor will create it on save"
+    fi
+    exec "$editor" "$edit_file"
     ;;
 esac

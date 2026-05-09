@@ -214,12 +214,14 @@ validator workflows.
 
 | Command | What it does |
 | --- | --- |
-| `bridge doctor` | Diagnose tools, auth, config, sessions. Exits non-zero on hard failures. |
+| `bridge init` | Create `config.toml` from `config.example.toml` with next-step guidance. |
+| `bridge doctor` | Diagnose tools, auth, config, sessions, gh scopes, templates. |
 | `bridge start` | Start tmux sessions for configured agents (idempotent). |
-| `bridge nudge` | Paste a structured prompt into an agent session via named tmux buffer. |
+| `bridge attach` | Attach to an agent's tmux session; `--pr` infers the active agent. |
+| `bridge nudge` | Paste a structured prompt into an agent session; `--dry-run` previews. |
 | `bridge watch` | Wait for explicit `BRIDGE_STATUS` markers on a PR. |
 | `bridge phase` | Drive or resume the full plan → review → implement → approve lifecycle. |
-| `bridge ps` | List active bridge runs across open PRs with current status. |
+| `bridge ps` | List active bridge runs across open PRs; `--watch` polls for changes. |
 | `bridge logs` | Replay the run journal for a bridge run (`--last`, `--pr`, `--run-id`). |
 
 **→ [Full command reference](docs/commands.md)** — all flags, options, and template placeholders.
@@ -227,15 +229,21 @@ validator workflows.
 ### Quick examples
 
 ```bash
+bridge init                                        # first-time setup
 bridge doctor
 bridge start
-bridge phase run --task "Phase 0: inspect live DB prerequisites"
+bridge attach codex                                # open agent pane
+bridge attach --pr 42                              # infer active agent
+bridge phase run --task "Phase 0: inspect DB"
 bridge phase resume --pr 42
-bridge phase resume --pr 42 --dry-run          # inspect state only
+bridge phase resume --pr 42 --dry-run              # inspect state only
+bridge phase plan-edit --pr 42                     # hand-edit plan
 bridge phase review-plan-file --pr 42 --plan-file docs/plan.md
-bridge ps                                      # what runs are alive?
-bridge logs                                    # replay last run journal
-bridge logs --pr 42                            # resolve by PR
+bridge nudge claude "Do X" --dry-run               # preview prompt
+bridge ps                                          # what runs are alive?
+bridge ps --watch                                  # live status changes
+bridge logs                                        # replay last run journal
+bridge logs --pr 42
 bridge watch 42 --status approved
 ```
 
@@ -400,8 +408,8 @@ bridge-watch 42 --agent codex \
 ## Project layout
 
 ```text
-bin/             bridge-start, bridge-nudge, bridge-watch, bridge-phase,
-                 bridge-doctor, bridge-ps, bridge-logs
+bin/             bridge-init, bridge-start, bridge-attach, bridge-nudge,
+                 bridge-watch, bridge-phase, bridge-doctor, bridge-ps, bridge-logs
 lib/             shared Bash helpers
 templates/       handoff, implementer, reviewer, plan-reviewer, context-maintainer prompts
 docs/            commands.md, phase-orchestration.md

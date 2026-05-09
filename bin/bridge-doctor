@@ -44,9 +44,19 @@ if command -v git >/dev/null 2>&1; then ok "git installed"; else warn "git not i
 # Optional.
 if command -v shellcheck >/dev/null 2>&1; then ok "shellcheck installed"; else warn "shellcheck not installed (optional, used for lint)"; fi
 
-# gh auth.
+# gh auth + scopes.
 if command -v gh >/dev/null 2>&1; then
-  if gh auth status >/dev/null 2>&1; then ok "gh authenticated"; else warn "gh not authenticated (run: gh auth login)"; fi
+  if gh auth status >/dev/null 2>&1; then
+    ok "gh authenticated"
+    # Check that the token has the repo scope (needed for PR comments, reviews).
+    if gh auth status 2>&1 | grep -q 'repo'; then
+      ok "gh token has repo scope"
+    else
+      warn "gh token may be missing 'repo' scope — bridge needs it to read/post PR comments and reviews (run: gh auth refresh -s repo)"
+    fi
+  else
+    warn "gh not authenticated (run: gh auth login)"
+  fi
 fi
 
 # Git repo.
@@ -56,10 +66,18 @@ else
   warn "no git repo at $(pwd) — bridge-watch will need --repo or BRIDGE_REPO"
 fi
 
-# Repo detection.
+# Repo detection + config/remote consistency.
 detected=$(bridge_resolve_repo 2>/dev/null || true)
 if [ -n "$detected" ]; then
   ok "GitHub repo: $detected"
+  # Warn if config.toml [github].repo disagrees with gh-detected remote.
+  if [ -n "${BRIDGE_GITHUB_REPO:-}" ] && [ "$BRIDGE_GITHUB_REPO" != "$detected" ]; then
+    # Only warn when the config-set value differs from what gh sees.
+    gh_remote=$(command -v gh >/dev/null 2>&1 && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
+    if [ -n "$gh_remote" ] && [ "$BRIDGE_GITHUB_REPO" != "$gh_remote" ]; then
+      warn "config [github].repo ($BRIDGE_GITHUB_REPO) does not match git remote repo ($gh_remote) — bridge will use the config value"
+    fi
+  fi
 else
   warn "GitHub repo not detected (set BRIDGE_REPO or run inside a gh-aware repo)"
 fi
@@ -68,7 +86,11 @@ fi
 if [ -n "${BRIDGE_CONFIG_USED:-}" ]; then
   ok "config: $BRIDGE_CONFIG_USED"
 else
-  warn "no config.toml found — using built-in defaults (codex, claude, kiro)"
+  if [ -f "./config.example.toml" ]; then
+    warn "no config.toml found — using built-in defaults (run: bridge init  to create one from config.example.toml)"
+  else
+    warn "no config.toml found — using built-in defaults (codex, claude, kiro)"
+  fi
 fi
 
 # Orchestration.
@@ -84,6 +106,23 @@ if bridge_orchestration_present; then
     done
     IFS="$_IFS"
   fi
+fi
+
+# Template files.
+_template_dir="$_BRIDGE_BIN_DIR/../templates"
+for _t in orchestrator-prompt.md implementer-prompt.md reviewer-prompt.md plan-reviewer-prompt.md; do
+  if [ -f "$_template_dir/$_t" ]; then
+    ok "template: $_t"
+  else
+    warn "template missing: $_template_dir/$_t (bridge phase commands may fail)"
+  fi
+done
+
+# bridge itself on PATH.
+if command -v bridge >/dev/null 2>&1; then
+  ok "bridge on PATH: $(command -v bridge)"
+else
+  warn "bridge not found in PATH — skills and tab-completion won't work (add install dir to PATH)"
 fi
 
 # Watch timing.
@@ -106,7 +145,11 @@ for a in $BRIDGE_AGENTS; do
   else
     warn "agent $a: tmux session '$s' not running (start: bridge-start $a)"
   fi
-  [ -n "$l" ] && log_info "agent $a: github_login=$l"
+  if [ -n "$l" ]; then
+    log_info "agent $a: github_login=$l"
+  else
+    warn "agent $a: github_login not set — bridge-watch --agent $a and reviewer polling will fail (set [agents.$a].github_login in config.toml)"
+  fi
 done
 
 log_info "summary: pass=$passes warn=$warns fail=$fails"

@@ -17,7 +17,9 @@ usage() {
 usage: bridge <command> [options]
 
 Commands:
+  init     Create config.toml from config.example.toml.
   start    Start tmux sessions for one or all configured agents.
+  attach   Attach to an agent's tmux session (or infer from --pr).
   nudge    Send a prompt to an agent session.
   watch    Wait for explicit BRIDGE_STATUS markers on a PR.
   phase    Drive or resume phase plan/implement/review loops.
@@ -26,13 +28,18 @@ Commands:
   logs     Replay the run journal for a bridge run.
 
 Examples:
+  bridge init
   bridge doctor
   bridge start
+  bridge attach codex
+  bridge attach --pr 42
   bridge phase run --task "Phase 0: inspect live DB prerequisites"
   bridge phase resume --pr 42
-  bridge nudge claude "Implement X"
+  bridge phase plan-edit --pr 42
+  bridge nudge claude "Implement X" --dry-run
   bridge watch 42 --status approved
   bridge ps
+  bridge ps --watch
   bridge logs --last
   bridge logs --pr 42
 
@@ -47,7 +54,7 @@ case "$cmd" in
     usage
     exit 0
     ;;
-  start|nudge|watch|phase|doctor|ps|logs)
+  init|start|attach|nudge|watch|phase|doctor|ps|logs)
     shift
     exec "$_BRIDGE_BIN_DIR/bridge-$cmd" "$@"
     ;;

@@ -4,6 +4,20 @@ Full option reference for every `bridge` command.
 
 ---
 
+## `bridge init`
+
+Create `config.toml` from `config.example.toml`.
+
+```bash
+bridge init             # create config.toml in current directory
+bridge init --force     # overwrite existing config.toml
+bridge init --dir /path # create in a specific directory
+```
+
+Prints next-step instructions on where to fill in `github_login`, `[github].repo`, and `[orchestration]`.
+
+---
+
 ## `bridge doctor`
 
 Diagnose the local bridge environment.
@@ -61,6 +75,7 @@ bridge nudge claude --template templates/implementer-prompt.md \
 | `--no-header` | Never prepend the handoff header |
 | `--header` | Force-prepend the handoff header |
 | `--strict-template` | Fail if any `{{PLACEHOLDER}}` remains unfilled |
+| `--dry-run` | Render prompt and print to stdout; do not paste into tmux |
 
 **Template placeholders:**
 
@@ -224,6 +239,19 @@ Nudge the orchestrator to revise the plan after `plan_changes_requested`.
 bridge phase plan-fix --pr 42 --run-id bridge-...
 ```
 
+### `bridge phase plan-edit`
+
+Open the phase plan file in `$EDITOR`. Useful after `plan_changes_requested`
+to hand-edit the plan before re-submitting to the plan-review loop.
+
+```bash
+bridge phase plan-edit                          # opens BRIDGE_PHASE_PLAN.md
+bridge phase plan-edit --plan-file docs/plan.md
+bridge phase plan-edit --pr 42                  # infers plan file from PR adoption comment
+```
+
+Uses `$VISUAL` then `$EDITOR` then `vi` as fallback. Creates the file on save if it doesn't exist yet.
+
 ### `bridge phase implement`
 
 Nudge the implementer (manual / debug).
@@ -260,6 +288,27 @@ bridge phase watch --pr 42 --state complete --run-id bridge-...
 
 ---
 
+## `bridge attach`
+
+Attach to an agent's tmux session.
+
+```bash
+bridge attach codex           # attach to codex session directly
+bridge attach --pr 42         # infer active agent from latest PR status
+bridge attach --list          # list all configured agents and session state
+```
+
+With `--pr`, reads the latest `BRIDGE_STATUS` and picks the agent most likely
+active for the next step (e.g. `implementation_ready` → reviewer, `changes_requested` → implementer).
+
+| Flag | Meaning |
+| --- | --- |
+| `--pr NUMBER` | Infer active agent from latest BRIDGE_STATUS |
+| `--repo OWNER/REPO` | Repo override (needed for `--pr`) |
+| `--list` | List all agents with session running/stopped status |
+
+---
+
 ## `bridge ps`
 
 List active bridge runs across open GitHub PRs.
@@ -284,6 +333,8 @@ PR     RUN_ID                            STATUS                       UPDATED
 | `--repo OWNER/REPO` | Repo override |
 | `--all` | Include closed PRs (slower) |
 | `--json` | Output as JSON array |
+| `--watch` | Poll continuously; print lines when status changes |
+| `--poll SECONDS` | Poll interval for `--watch` (default: 15) |
 
 ---
 

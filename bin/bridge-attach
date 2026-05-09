@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# bridge-attach — attach to an agent's tmux session.
+set -eu
+
+_BRIDGE_BIN_DIR=$(cd "$(dirname "$0")" && pwd)
+if [ -L "$0" ]; then
+  _real=$(readlink "$0")
+  case "$_real" in
+    /*) ;;
+    *) _real="$_BRIDGE_BIN_DIR/$_real" ;;
+  esac
+  _BRIDGE_BIN_DIR=$(cd "$(dirname "$_real")" && pwd)
+fi
+_BRIDGE_LIB_DIR="$_BRIDGE_BIN_DIR/../lib"
+# shellcheck source=lib/bridge-common.sh disable=SC1091
+. "$_BRIDGE_LIB_DIR/bridge-common.sh"
+
+usage() {
+  cat <<EOF
+usage: bridge attach [agent] [options]
+
+Attach to an agent's tmux session. With --pr, auto-detects which agent is
+currently active for the run and offers to attach to it.
+
+Arguments:
+  agent               Agent name (codex, claude, kiro, ...). If omitted,
+                      --pr is used to infer the active agent.
+
+Options:
+  --pr NUMBER         Infer active agent from latest BRIDGE_STATUS on this PR
+  --repo OWNER/REPO   Repo override (needed for --pr)
+  --list              List all configured agent sessions with their status
+  -h, --help          Show this help
+EOF
+}
+
+agent=""
+pr=""
+repo=""
+list_mode=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --pr)      pr="${2:?--pr requires value}"; shift 2 ;;
+    --repo)    repo="${2:?--repo requires value}"; shift 2 ;;
+    --list)    list_mode=1; shift ;;
+    --) shift; break ;;
+    -*)        die "unknown flag: $1 (try --help)" ;;
+    *)
+      [ -z "$agent" ] || die "unexpected argument: $1 (agent already set to '$agent')"
+      agent="$1"; shift
+      ;;
+  esac
+done
+
+bridge_load
+require_cmd tmux
+
+[ -n "$repo" ] || repo="${BRIDGE_GITHUB_REPO:-}"
+
+# --list: print all agents and session status.
+if [ "$list_mode" -eq 1 ]; then
+  printf "%-12s %-20s %-8s\n" "AGENT" "SESSION" "STATUS"
+  printf "%-12s %-20s %-8s\n" "------------" "--------------------" "--------"
+  for a in $BRIDGE_AGENTS; do
+    s=$(agent_get "$a" SESSION)
+    if tmux has-session -t "$s" 2>/dev/null; then
+      st="running"
+    else
+      st="stopped"
+    fi
+    printf "%-12s %-20s %-8s\n" "$a" "$s" "$st"
+  done
+  exit 0
+fi
+
+# If agent is given directly, attach immediately.
+if [ -n "$agent" ]; then
+  agent_exists "$agent" || die "unknown agent: $agent (configured: $BRIDGE_AGENTS)"
+  session=$(agent_get "$agent" SESSION)
+  tmux has-session -t "$session" 2>/dev/null \
+    || die "tmux session '$session' not running — start it with: bridge start $agent"
+  exec tmux attach-session -t "$session"
+fi
+
+# No agent given: use --pr to infer which agent is active.
+[ -n "$pr" ] || die "pass an agent name or --pr NUMBER (use --list to see all sessions)"
+require_cmd gh
+require_cmd jq
+
+[ -n "$repo" ] || repo=$(bridge_resolve_repo) || die "could not resolve GitHub repo (use --repo)"
+
+# Read latest BRIDGE_STATUS from PR.
+all_bodies=$(
+  pr_body=$(gh api "repos/$repo/pulls/$pr" --jq '.body // ""' 2>/dev/null || true)
+  comments=$(gh api "repos/$repo/issues/$pr/comments" --paginate --jq '[.[].body // ""] | .[]' 2>/dev/null || true)
+  printf '%s\n' "$pr_body" "$comments"
+)
+
+latest_status=$(printf "%s\n" "$all_bodies" | awk '
+  /^[[:space:]]*BRIDGE_STATUS:[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*$/ {
+    v = $0
+    sub(/^[[:space:]]*BRIDGE_STATUS:[[:space:]]+/, "", v)
+    sub(/[[:space:]]+$/, "", v)
+    last = v
+  }
+  END { if (last) print last }
+')
+
+if [ -z "$latest_status" ]; then
+  log_warn "no BRIDGE_STATUS markers found on PR #$pr"
+  log_info "configured agents:"
+  for a in $BRIDGE_AGENTS; do
+    s=$(agent_get "$a" SESSION)
+    printf "  %s -> session '%s'\n" "$a" "$s"
+  done
+  exit 1
+fi
+
+# Map status to the agent most likely to be active next.
+# "active_next" means: who should be nudged for the next step.
+case "$latest_status" in
+  plan_ready|plan_changes_requested)
+    # Plan reviewer is running (or about to). Show reviewer.
+    role_hint="${BRIDGE_REVIEWER:-codex}"
+    ;;
+  plan_approved|context_updated|context_noop)
+    # Implementation is next.
+    role_hint="${BRIDGE_IMPLEMENTER:-kiro}"
+    ;;
+  implementation_ready|fixes_pushed)
+    # Review is next.
+    role_hint="${BRIDGE_REVIEWER:-codex}"
+    ;;
+  changes_requested)
+    # Implementer is fixing.
+    role_hint="${BRIDGE_IMPLEMENTER:-kiro}"
+    ;;
+  approved|completed)
+    # Done. Default to orchestrator.
+    role_hint="${BRIDGE_ORCHESTRATOR:-claude}"
+    ;;
+  *)
+    role_hint=""
+    ;;
+esac
+
+log_info "PR #$pr latest status: $latest_status"
+
+if [ -n "$role_hint" ] && agent_exists "$role_hint"; then
+  session=$(agent_get "$role_hint" SESSION)
+  if tmux has-session -t "$session" 2>/dev/null; then
+    log_info "active agent for $latest_status: $role_hint (session '$session')"
+    exec tmux attach-session -t "$session"
+  else
+    log_warn "inferred agent '$role_hint' session '$session' not running — start it with: bridge start $role_hint"
+  fi
+fi
+
+# Fallback: list running sessions and let user pick.
+log_info "running sessions:"
+for a in $BRIDGE_AGENTS; do
+  s=$(agent_get "$a" SESSION)
+  if tmux has-session -t "$s" 2>/dev/null; then
+    printf "  bridge attach %s\n" "$a"
+  fi
+done
+exit 1

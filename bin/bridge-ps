@@ -26,6 +26,8 @@ Options:
   --repo OWNER/REPO   repo override
   --all               include closed PRs (slower)
   --json              output as JSON array
+  --watch             poll continuously; print lines when status changes
+  --poll SECONDS      poll interval for --watch (default: 15)
   -h, --help          show this help
 EOF
 }
@@ -33,6 +35,8 @@ EOF
 repo=""
 include_closed=0
 json_out=0
+watch_mode=0
+poll_interval=15
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -40,6 +44,8 @@ while [ $# -gt 0 ]; do
     --repo)    repo="${2:?--repo requires value}"; shift 2 ;;
     --all)     include_closed=1; shift ;;
     --json)    json_out=1; shift ;;
+    --watch)   watch_mode=1; shift ;;
+    --poll)    poll_interval="${2:?--poll requires value}"; shift 2 ;;
     --) shift; break ;;
     -*) die "unknown flag: $1 (try --help)" ;;
     *) die "unexpected argument: $1" ;;
@@ -56,14 +62,6 @@ if [ "$include_closed" -eq 1 ]; then
   pr_state="all"
 else
   pr_state="open"
-fi
-
-prs=$(gh pr list --repo "$repo" --state "$pr_state" --limit 100 --json number,title,headRefName,updatedAt 2>/dev/null || printf "[]")
-pr_count=$(printf "%s" "$prs" | jq 'length')
-
-if [ "$pr_count" -eq 0 ]; then
-  if [ "$json_out" -eq 1 ]; then printf "[]\n"; else log_info "no open PRs found in $repo"; fi
-  exit 0
 fi
 
 # shellcheck disable=SC2016
@@ -122,41 +120,6 @@ $run_ids
 EOF
 }
 
-rows=""
-pr_numbers=$(printf "%s" "$prs" | jq -r '.[] | [.number, .title, .updatedAt] | @tsv')
-
-while IFS=$(printf '\t') read -r pr_num pr_title pr_updated; do
-  [ -n "$pr_num" ] || continue
-  row=$(_scan_pr "$pr_num" "$pr_title" "$pr_updated")
-  [ -n "$row" ] || continue
-  rows="${rows:+$rows
-}$row"
-done <<EOF
-$pr_numbers
-EOF
-
-if [ -z "$rows" ]; then
-  if [ "$json_out" -eq 1 ]; then printf "[]\n"; else log_info "no bridge runs found in $repo"; fi
-  exit 0
-fi
-
-if [ "$json_out" -eq 1 ]; then
-  printf "%s\n" "$rows" | awk -F'\t' '
-    BEGIN { printf "[" }
-    NR > 1 { printf "," }
-    {
-      # Minimal JSON escaping for title
-      title = $5
-      gsub(/"/, "\\\"", title)
-      printf "{\"pr\":%s,\"run_id\":\"%s\",\"status\":\"%s\",\"updated_at\":\"%s\",\"title\":\"%s\"}", $1, $2, $3, $4, title
-    }
-    END { printf "]\n" }
-  '
-  exit 0
-fi
-
-# Pretty table output.
-# Compute relative time from updated_at.
 _rel_time() {
   local iso="$1"
   local epoch now diff
@@ -170,12 +133,104 @@ _rel_time() {
   fi
 }
 
-printf "%-6s %-32s %-28s %-7s\n" "PR" "RUN_ID" "STATUS" "UPDATED"
-printf "%-6s %-32s %-28s %-7s\n" "------" "--------------------------------" "----------------------------" "-------"
-while IFS=$(printf '\t') read -r pr_num rid status pr_updated _pr_title; do
-  [ -n "$pr_num" ] || continue
-  rel=$(_rel_time "$pr_updated")
-  printf "%-6s %-32s %-28s %-7s\n" "#$pr_num" "$rid" "$status" "$rel"
-done <<EOF
-$rows
-EOF
+_fetch_rows() {
+  local _prs _pr_count _pr_numbers _rows _pr_num _pr_title _pr_updated _row
+  _prs=$(gh pr list --repo "$repo" --state "$pr_state" --limit 100 --json number,title,headRefName,updatedAt 2>/dev/null || printf "[]")
+  _pr_count=$(printf "%s" "$_prs" | jq 'length')
+  [ "$_pr_count" -gt 0 ] || { printf ""; return 0; }
+  _pr_numbers=$(printf "%s" "$_prs" | jq -r '.[] | [.number, .title, .updatedAt] | @tsv')
+  _rows=""
+  while IFS=$(printf '\t') read -r _pr_num _pr_title _pr_updated; do
+    [ -n "$_pr_num" ] || continue
+    _row=$(_scan_pr "$_pr_num" "$_pr_title" "$_pr_updated")
+    [ -n "$_row" ] || continue
+    _rows="${_rows:+$_rows
+}$_row"
+  done <<PREOF
+$_pr_numbers
+PREOF
+  printf "%s" "$_rows"
+}
+
+_print_rows() {
+  local _rows="$1"
+  if [ "$json_out" -eq 1 ]; then
+    printf "%s\n" "$_rows" | awk -F'\t' '
+      BEGIN { printf "[" }
+      NR > 1 { printf "," }
+      {
+        title = $5; gsub(/"/, "\\\"", title)
+        printf "{\"pr\":%s,\"run_id\":\"%s\",\"status\":\"%s\",\"updated_at\":\"%s\",\"title\":\"%s\"}", $1, $2, $3, $4, title
+      }
+      END { printf "]\n" }
+    '
+    return
+  fi
+  printf "%-6s %-32s %-28s %-7s\n" "PR" "RUN_ID" "STATUS" "UPDATED"
+  printf "%-6s %-32s %-28s %-7s\n" "------" "--------------------------------" "----------------------------" "-------"
+  while IFS=$(printf '\t') read -r _pr_num _rid _status _pr_updated _pr_title; do
+    [ -n "$_pr_num" ] || continue
+    _rel=$(_rel_time "$_pr_updated")
+    printf "%-6s %-32s %-28s %-7s\n" "#$_pr_num" "$_rid" "$_status" "$_rel"
+  done <<ROWEOF
+$_rows
+ROWEOF
+}
+
+if [ "$watch_mode" -eq 0 ]; then
+  rows=$(_fetch_rows)
+  if [ -z "$rows" ]; then
+    if [ "$json_out" -eq 1 ]; then printf "[]\n"; else log_info "no bridge runs found in $repo"; fi
+    exit 0
+  fi
+  _print_rows "$rows"
+  exit 0
+fi
+
+# --watch mode: poll and print lines when status changes.
+log_info "watching $repo every ${poll_interval}s (Ctrl-C to stop)"
+prev_state=""   # key=run_id value=status
+
+while :; do
+  rows=$(_fetch_rows)
+  # Build current state snapshot: run_id=status lines.
+  current_state=""
+  while IFS=$(printf '\t') read -r _pr _rid _status _updated _title; do
+    [ -n "$_rid" ] || continue
+    current_state="${current_state:+$current_state
+}${_rid}=${_status}"
+  done <<WEOF
+${rows:-}
+WEOF
+
+  # Print header once on first pass, then only changed/new rows.
+  if [ -z "$prev_state" ]; then
+    if [ -n "$rows" ]; then
+      _print_rows "$rows"
+    else
+      log_info "no bridge runs found yet"
+    fi
+  else
+    # Detect new or changed run_ids.
+    changed_rows=""
+    while IFS=$(printf '\t') read -r _pr _rid _status _updated _title; do
+      [ -n "$_rid" ] || continue
+      # Look for this run_id in prev_state.
+      prev_status=$(printf "%s\n" "$prev_state" | awk -F= -v rid="$_rid" '$1 == rid { print $2; exit }')
+      if [ "$prev_status" != "$_status" ]; then
+        changed_rows="${changed_rows:+$changed_rows
+}${_pr}	${_rid}	${_status}	${_updated}	${_title}"
+      fi
+    done <<WEOF2
+${rows:-}
+WEOF2
+    if [ -n "$changed_rows" ]; then
+      now_iso=$(bridge_now_iso)
+      printf "\n[%s]\n" "$now_iso"
+      _print_rows "$changed_rows"
+    fi
+  fi
+
+  prev_state="$current_state"
+  sleep "$poll_interval"
+done

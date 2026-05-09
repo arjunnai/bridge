@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# bridge-init — create config.toml from config.example.toml.
+set -eu
+
+_BRIDGE_BIN_DIR=$(cd "$(dirname "$0")" && pwd)
+if [ -L "$0" ]; then
+  _real=$(readlink "$0")
+  case "$_real" in
+    /*) ;;
+    *) _real="$_BRIDGE_BIN_DIR/$_real" ;;
+  esac
+  _BRIDGE_BIN_DIR=$(cd "$(dirname "$_real")" && pwd)
+fi
+_BRIDGE_LIB_DIR="$_BRIDGE_BIN_DIR/../lib"
+# shellcheck source=lib/bridge-common.sh disable=SC1091
+. "$_BRIDGE_LIB_DIR/bridge-common.sh"
+
+usage() {
+  cat <<EOF
+usage: bridge init [--force] [--dir PATH]
+
+Create config.toml from config.example.toml if it does not exist.
+
+Options:
+  --force     Overwrite existing config.toml
+  --dir PATH  Directory to create config.toml in (default: current dir)
+  -h, --help  Show this help
+EOF
+}
+
+force=0
+target_dir="."
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --force)   force=1; shift ;;
+    --dir)     target_dir="${2:?--dir requires value}"; shift 2 ;;
+    --) shift; break ;;
+    -*) die "unknown flag: $1 (try --help)" ;;
+    *) die "unexpected argument: $1" ;;
+  esac
+done
+
+dest="$target_dir/config.toml"
+
+# Find config.example.toml relative to this script or the target dir.
+example=""
+for candidate in \
+  "$target_dir/config.example.toml" \
+  "$_BRIDGE_BIN_DIR/../config.example.toml"; do
+  if [ -f "$candidate" ]; then
+    example="$candidate"
+    break
+  fi
+done
+
+[ -n "$example" ] || die "config.example.toml not found — are you in the bridge repo directory?"
+
+if [ -f "$dest" ] && [ "$force" -eq 0 ]; then
+  die "$dest already exists — use --force to overwrite, or edit it directly"
+fi
+
+cp "$example" "$dest"
+log_ok "created $dest from $example"
+
+# Print next-step guidance.
+cat >&2 <<EOF
+
+Next steps:
+  1. Edit $dest:
+       - Set [github].repo = "OWNER/REPO"
+       - Set [agents.codex].github_login = "<your codex bot login>"
+       - Set [agents.claude].github_login = "<your claude login>"
+       - Set [orchestration] to match your workflow
+  2. Run: bridge doctor
+  3. Run: bridge start
+EOF

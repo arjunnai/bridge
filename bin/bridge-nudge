@@ -42,6 +42,7 @@ Options:
   --no-header               never prepend the handoff header
   --strict-template         fail if template still has unfilled {{PLACEHOLDERS}}
   --session NAME            override tmux session name
+  --dry-run                 render prompt and print to stdout; do not paste
   -h, --help                show this help
 
 Known template placeholders:
@@ -67,6 +68,7 @@ plan_file_override=""
 header_mode="auto"
 strict=0
 session_override=""
+dry_run=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -85,6 +87,7 @@ while [ $# -gt 0 ]; do
     --header)          header_mode="force"; shift ;;
     --no-header)       header_mode="off"; shift ;;
     --strict-template) strict=1; shift ;;
+    --dry-run)         dry_run=1; shift ;;
     --) shift; break ;;
     -*) die "unknown flag: $1 (try --help)" ;;
     *)
@@ -104,7 +107,7 @@ done
 [ -n "$agent" ] || { usage >&2; exit 2; }
 
 bridge_load
-require_cmd tmux
+[ "$dry_run" -eq 0 ] && require_cmd tmux
 
 agent_exists "$agent" || die "unknown agent: $agent (configured: $BRIDGE_AGENTS)"
 session="$session_override"
@@ -203,6 +206,12 @@ if [ "$include_header" -eq 1 ]; then
   [ -n "$expected" ]       && header="${header}EXPECTED_OUTPUT: $expected"$'\n'
   [ -n "$status_marker" ]  && header="${header}STATUS_MARKER: $status_marker"$'\n'
   prompt="${header}"$'\n'"$prompt"
+fi
+
+if [ "$dry_run" -eq 1 ]; then
+  printf "%s\n" "$prompt"
+  printf "BRIDGE_RUN_ID=%s\n" "$run_id" >&2
+  exit 0
 fi
 
 tmux has-session -t "$session" 2>/dev/null \

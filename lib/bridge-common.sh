@@ -259,7 +259,7 @@ bridge_load() {
     [ -f "$cfg" ] || die "config not found: $cfg"
     case "$cfg" in
       *config.example.toml)
-        die "refusing to load config.example.toml — copy it to config.toml first"
+        die "refusing to load config.example.toml — run: bridge init  (or: cp config.example.toml config.toml)"
         ;;
     esac
     bridge_parse_toml "$cfg"
